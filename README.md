@@ -59,17 +59,16 @@ All via environment variables (or `.env` file):
 
 ## Architecture
 
-```
-A2A Client ──POST /a2a──▶ a2a-sdk Server ──▶ AgentlingExecutor
-                                                      │
-MCP Client ──POST /mcp──▶ mcp SDK Server ──────────────┤
-                                                      ▼
-                                               MessageLoop
-                                              ┌─────┴─────┐
-                                              ▼           ▼
-                                         JSONL Store   LLM Client
-                                                      ▼
-                                                 Tool Registry
+```mermaid
+graph TB
+    A2A[A2A Client] -->|POST /a2a| A2ASDK[a2a-sdk Server]
+    MCP[MCP Client] -->|POST /mcp| MCPSDK[mcp SDK Server]
+    A2ASDK --> Executor[AgentlingExecutor]
+    Executor --> Loop[MessageLoop]
+    MCPSDK --> Loop
+    Loop --> Store[JSONL Store]
+    Loop --> LLM[LLM Client]
+    Loop --> Tools[Tool Registry]
 ```
 
 Both protocols feed into a single `MessageLoop.process_message()` entrance. Conversations are persisted as append-only JSONL journals with compaction markers as replay cursors.
