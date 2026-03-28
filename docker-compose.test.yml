@@ -10,7 +10,7 @@ services:
     ports:
       - "8420:8420"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/.well-known/agent.json')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/.well-known/agent-card.json')"]
       interval: 2s
       timeout: 5s
       retries: 15

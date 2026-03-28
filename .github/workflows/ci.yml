@@ -7,9 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  unit-tests:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -23,5 +22,13 @@ jobs:
       - name: Unit tests
         run: pytest tests/unit/ -v
 
-      - name: Integration tests
+      - name: Integration tests (in-process)
         run: pytest tests/integration/ -v
+
+  docker-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run agentling container
+        run: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test-runner
