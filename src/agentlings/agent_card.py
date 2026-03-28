@@ -11,7 +11,10 @@ from agentlings.config import AgentConfig
 
 
 def generate_agent_card(config: AgentConfig) -> AgentCard:
-    url = f"http://{config.agent_host}:{config.agent_port}/a2a"
+    if config.agent_external_url:
+        url = config.agent_external_url.rstrip("/") + "/a2a"
+    else:
+        url = f"http://{config.agent_host}:{config.agent_port}/a2a"
     return AgentCard(
         name=config.agent_name,
         description=config.agent_description,

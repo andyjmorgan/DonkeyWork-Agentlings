@@ -26,6 +26,7 @@ class AgentConfig(BaseSettings):
     agent_system_prompt_file: str | None = None
     agent_log_level: str = "INFO"
     agent_llm_backend: Literal["anthropic", "mock"] = "anthropic"
+    agent_external_url: str | None = None
 
     @model_validator(mode="after")
     def _ensure_data_dir(self) -> AgentConfig:
