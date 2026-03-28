@@ -1,0 +1,28 @@
+services:
+  agentling:
+    build: .
+    environment:
+      - AGENT_API_KEY=test-key
+      - AGENT_NAME=test-agent
+      - AGENT_DESCRIPTION=A test agent
+      - AGENT_LLM_BACKEND=mock
+      - AGENT_EXTERNAL_URL=http://agentling:8420
+      - AGENT_LOG_LEVEL=WARNING
+    ports:
+      - "8420:8420"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/.well-known/agent-card.json')"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      agentling:
+        condition: service_healthy
+    environment:
+      - AGENT_URL=http://agentling:8420
+      - AGENT_API_KEY=test-key
