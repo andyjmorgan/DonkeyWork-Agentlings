@@ -160,10 +160,16 @@ def _extract_text(message: dict[str, Any]) -> str:
 
 
 def _build_mock_tool_input(tool_name: str, text: str) -> dict[str, Any]:
-    if tool_name == "shell":
+    if tool_name == "bash":
         return {"command": "echo 'mock command'"}
     if tool_name == "read_file":
         return {"path": "/tmp/mock_file.txt"}
     if tool_name == "write_file":
         return {"path": "/tmp/mock_file.txt", "content": "mock content"}
+    if tool_name == "edit_file":
+        return {"path": "/tmp/mock_file.txt", "old_text": "old", "new_text": "new"}
+    if tool_name == "list_directory":
+        return {"path": "/tmp"}
+    if tool_name == "search_files":
+        return {"path": "/tmp", "pattern": "*.txt"}
     return {"input": text}

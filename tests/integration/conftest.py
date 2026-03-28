@@ -58,6 +58,7 @@ def _server(base_url: str, api_key: str, tmp_path_factory):
         agent_description="A test agent",
         agent_host="127.0.0.1",
         agent_port=port,
+        agent_tools="bash,filesystem",
     )
     app = _create_app(config)
 

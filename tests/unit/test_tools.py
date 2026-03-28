@@ -69,56 +69,172 @@ class TestExecute:
         assert result.is_error is True
 
 
-class TestBuiltins:
-    def test_register_builtins(self, registry: ToolRegistry) -> None:
-        registry.register_builtins()
+class TestRegisterTools:
+    def test_no_tools_when_empty(self, registry: ToolRegistry) -> None:
+        registry.register_tools([])
+        assert registry.tool_names() == []
+
+    def test_register_bash_group(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["bash"])
+        assert "bash" in registry.tool_names()
+
+    def test_register_filesystem_group(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["filesystem"])
         names = registry.tool_names()
-        assert "shell" in names
         assert "read_file" in names
         assert "write_file" in names
+        assert "edit_file" in names
+        assert "list_directory" in names
+        assert "search_files" in names
+
+    def test_register_individual_tool(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["read_file"])
+        assert registry.tool_names() == ["read_file"]
+
+    def test_register_multiple_groups(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["bash", "filesystem"])
+        names = registry.tool_names()
+        assert "bash" in names
+        assert "read_file" in names
+
+    def test_unknown_tool_ignored(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["nonexistent"])
+        assert registry.tool_names() == []
+
+
+class TestBashTool:
+    @pytest.fixture(autouse=True)
+    def setup(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["bash"])
+        self.registry = registry
 
     @pytest.mark.asyncio
-    async def test_shell_echo(self, registry: ToolRegistry) -> None:
-        registry.register_builtins()
-        result = await registry.execute("shell", {"command": "echo hello"})
+    async def test_echo(self) -> None:
+        result = await self.registry.execute("bash", {"command": "echo hello"})
         assert result.output == "hello"
         assert result.is_error is False
 
     @pytest.mark.asyncio
-    async def test_shell_nonzero_exit(self, registry: ToolRegistry) -> None:
-        registry.register_builtins()
-        result = await registry.execute("shell", {"command": "exit 1"})
+    async def test_nonzero_exit(self) -> None:
+        result = await self.registry.execute("bash", {"command": "exit 1"})
         assert result.is_error is True
 
     @pytest.mark.asyncio
-    async def test_shell_timeout(self, registry: ToolRegistry) -> None:
-        registry.register_builtins()
-        result = await registry.execute(
-            "shell", {"command": "sleep 10", "timeout": 1}
+    async def test_timeout(self) -> None:
+        result = await self.registry.execute(
+            "bash", {"command": "sleep 10", "timeout": 1}
         )
         assert result.is_error is True
         assert "timed out" in result.output
 
-    @pytest.mark.asyncio
-    async def test_read_file(self, registry: ToolRegistry, tmp_path) -> None:
-        registry.register_builtins()
-        f = tmp_path / "test.txt"
-        f.write_text("file content")
-        result = await registry.execute("read_file", {"path": str(f)})
-        assert result.output == "file content"
+
+class TestFilesystemTools:
+    @pytest.fixture(autouse=True)
+    def setup(self, registry: ToolRegistry) -> None:
+        registry.register_tools(["filesystem"])
+        self.registry = registry
 
     @pytest.mark.asyncio
-    async def test_read_file_missing(self, registry: ToolRegistry) -> None:
-        registry.register_builtins()
-        result = await registry.execute("read_file", {"path": "/nonexistent/file.txt"})
+    async def test_read_file(self, tmp_path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("line 1\nline 2\nline 3")
+        result = await self.registry.execute("read_file", {"path": str(f)})
+        assert "line 1" in result.output
+        assert "line 2" in result.output
+        assert result.is_error is False
+
+    @pytest.mark.asyncio
+    async def test_read_file_with_offset_limit(self, tmp_path) -> None:
+        f = tmp_path / "test.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(100)))
+        result = await self.registry.execute(
+            "read_file", {"path": str(f), "offset": 10, "limit": 5}
+        )
+        assert "line 10" in result.output
+        assert "line 14" in result.output
+        assert "line 15" not in result.output
+
+    @pytest.mark.asyncio
+    async def test_read_file_missing(self) -> None:
+        result = await self.registry.execute("read_file", {"path": "/nonexistent"})
         assert result.is_error is True
 
     @pytest.mark.asyncio
-    async def test_write_file(self, registry: ToolRegistry, tmp_path) -> None:
-        registry.register_builtins()
+    async def test_write_file(self, tmp_path) -> None:
         f = tmp_path / "out.txt"
-        result = await registry.execute(
-            "write_file", {"path": str(f), "content": "written"}
+        result = await self.registry.execute(
+            "write_file", {"path": str(f), "content": "hello"}
         )
         assert result.is_error is False
-        assert f.read_text() == "written"
+        assert f.read_text() == "hello"
+
+    @pytest.mark.asyncio
+    async def test_edit_file(self, tmp_path) -> None:
+        f = tmp_path / "edit.txt"
+        f.write_text("hello world")
+        result = await self.registry.execute(
+            "edit_file",
+            {"path": str(f), "old_text": "world", "new_text": "there"},
+        )
+        assert result.is_error is False
+        assert f.read_text() == "hello there"
+
+    @pytest.mark.asyncio
+    async def test_edit_file_not_found(self, tmp_path) -> None:
+        f = tmp_path / "edit.txt"
+        f.write_text("hello world")
+        result = await self.registry.execute(
+            "edit_file",
+            {"path": str(f), "old_text": "missing", "new_text": "x"},
+        )
+        assert result.is_error is True
+
+    @pytest.mark.asyncio
+    async def test_edit_file_multiple_matches_fails(self, tmp_path) -> None:
+        f = tmp_path / "edit.txt"
+        f.write_text("aaa aaa")
+        result = await self.registry.execute(
+            "edit_file",
+            {"path": str(f), "old_text": "aaa", "new_text": "bbb"},
+        )
+        assert result.is_error is True
+        assert "2 times" in result.output
+
+    @pytest.mark.asyncio
+    async def test_edit_file_replace_all(self, tmp_path) -> None:
+        f = tmp_path / "edit.txt"
+        f.write_text("aaa aaa")
+        result = await self.registry.execute(
+            "edit_file",
+            {
+                "path": str(f),
+                "old_text": "aaa",
+                "new_text": "bbb",
+                "replace_all": True,
+            },
+        )
+        assert result.is_error is False
+        assert f.read_text() == "bbb bbb"
+
+    @pytest.mark.asyncio
+    async def test_list_directory(self, tmp_path) -> None:
+        (tmp_path / "file.txt").touch()
+        (tmp_path / "subdir").mkdir()
+        result = await self.registry.execute(
+            "list_directory", {"path": str(tmp_path)}
+        )
+        assert "[DIR] subdir" in result.output
+        assert "[FILE] file.txt" in result.output
+
+    @pytest.mark.asyncio
+    async def test_search_files(self, tmp_path) -> None:
+        (tmp_path / "a.py").touch()
+        (tmp_path / "b.txt").touch()
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "c.py").touch()
+        result = await self.registry.execute(
+            "search_files", {"path": str(tmp_path), "pattern": "*.py"}
+        )
+        assert "a.py" in result.output
+        assert "c.py" in result.output
+        assert "b.txt" not in result.output

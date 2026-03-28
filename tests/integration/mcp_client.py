@@ -19,9 +19,9 @@ class MCPToolCallResult:
 
 
 class MCPTestClient:
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(self, base_url: str, api_key: str = "") -> None:
         self._url = f"{base_url}/mcp"
-        self._headers = {"X-API-Key": api_key}
+        self._headers = {"X-API-Key": api_key} if api_key else {}
 
     async def list_tools(self) -> list[dict[str, Any]]:
         async with streamablehttp_client(

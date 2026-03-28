@@ -59,3 +59,24 @@ def test_llm_backend_validation(tmp_path: Path) -> None:
             agent_data_dir=tmp_path,
             agent_llm_backend="invalid",  # type: ignore[arg-type]
         )
+
+
+def test_enabled_tools_empty(tmp_path: Path) -> None:
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path,
+    )
+    assert config.enabled_tools == []
+
+
+def test_enabled_tools_parsed(tmp_path: Path) -> None:
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path,
+        agent_tools="bash, filesystem",
+    )
+    assert config.enabled_tools == ["bash", "filesystem"]
+
+
