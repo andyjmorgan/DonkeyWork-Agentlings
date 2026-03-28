@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentlings"
+version = "0.1.0"
+description = "Lightweight A2A + MCP single-process agent framework"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.52",
+    "a2a-sdk>=0.3.25",
+    "starlette>=0.46",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.9",
+    "mcp>=1.9",
+    "python-dotenv>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.28",
+    "a2a-sdk>=0.3.25",
+]
+
+[project.scripts]
+agentling = "agentlings.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentlings"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
