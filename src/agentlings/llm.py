@@ -56,10 +56,7 @@ class AnthropicLLMClient(BaseLLMClient):
         if tools:
             kwargs["tools"] = tools
 
-        response = await self._client.messages.create(
-            **kwargs,
-            betas=["interleaved-thinking-2025-05-14"],
-        )
+        response = await self._client.messages.create(**kwargs)
         return LLMResponse(
             content=[block.model_dump() for block in response.content],
             stop_reason=response.stop_reason,
