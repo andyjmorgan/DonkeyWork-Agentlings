@@ -74,6 +74,12 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
     tools = ToolRegistry()
     tools.register_tools(config.enabled_tools)
 
+    if not tools.tool_names():
+        logger.warning(
+            "no tools enabled — set AGENT_TOOLS to enable tools "
+            "(run 'agentling --list-tools' to see available options)"
+        )
+
     llm = create_llm_client(
         backend=config.agent_llm_backend,
         api_key=config.anthropic_api_key,
