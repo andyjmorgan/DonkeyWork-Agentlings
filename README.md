@@ -37,6 +37,86 @@ The agent serves:
 - `POST /a2a` — A2A JSON-RPC endpoint
 - `POST /mcp` — MCP Streamable HTTP endpoint
 
+## Running as a daemon
+
+### systemd (Linux)
+
+Create `/etc/systemd/system/agentling.service`:
+
+```ini
+[Unit]
+Description=Agentling
+After=network.target
+
+[Service]
+Type=simple
+User=agentling
+WorkingDirectory=/opt/agentling
+EnvironmentFile=/opt/agentling/.env
+ExecStart=/opt/agentling/venv/bin/agentling
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# Set up
+sudo useradd -r -s /bin/false agentling
+sudo mkdir -p /opt/agentling
+sudo python3 -m venv /opt/agentling/venv
+sudo /opt/agentling/venv/bin/pip install agentlings
+
+# Copy your config
+sudo cp agent.yaml /opt/agentling/agent.yaml
+sudo cp .env /opt/agentling/.env    # ANTHROPIC_API_KEY, AGENT_API_KEY, AGENT_CONFIG=./agent.yaml
+
+# Start
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentling
+sudo journalctl -u agentling -f
+```
+
+### launchd (macOS)
+
+Create `~/Library/LaunchAgents/com.donkeywork.agentling.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.donkeywork.agentling</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/venv/bin/agentling</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/agentling</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AGENT_CONFIG</key>
+        <string>./agent.yaml</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>sk-ant-...</string>
+        <key>AGENT_API_KEY</key>
+        <string>your-key</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentling.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.donkeywork.agentling.plist
+tail -f /tmp/agentling.err
+```
+
 ## Agent definition
 
 Agent identity lives in a YAML file (`agent.yaml`):
