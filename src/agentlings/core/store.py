@@ -1,3 +1,5 @@
+"""Append-only JSONL conversation journal with compaction-aware replay."""
+
 from __future__ import annotations
 
 import fcntl
@@ -6,16 +8,22 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agentlings.models import CompactionEntry, JournalEntry, MessageEntry
+from agentlings.core.models import CompactionEntry, MessageEntry
 
 logger = logging.getLogger(__name__)
 
 
 class ContextNotFoundError(Exception):
-    pass
+    """Raised when a context ID does not correspond to an existing journal file."""
 
 
 class JournalStore:
+    """Manages per-context JSONL journal files for conversation persistence.
+
+    Each context gets its own file at ``{data_dir}/{context_id}.jsonl``.
+    Entries are append-only and never modified or deleted.
+    """
+
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -24,14 +32,33 @@ class JournalStore:
         return self._data_dir / f"{ctx_id}.jsonl"
 
     def create(self, ctx_id: str) -> None:
+        """Create an empty journal file for a new context.
+
+        Args:
+            ctx_id: The context identifier.
+        """
         path = self._path(ctx_id)
         path.touch(exist_ok=True)
         logger.info("created context %s", ctx_id)
 
     def exists(self, ctx_id: str) -> bool:
+        """Check whether a journal file exists for the given context.
+
+        Args:
+            ctx_id: The context identifier.
+        """
         return self._path(ctx_id).exists()
 
     def append(self, ctx_id: str, entry: MessageEntry | CompactionEntry) -> None:
+        """Append a journal entry to the context's JSONL file.
+
+        Args:
+            ctx_id: The context identifier.
+            entry: The journal entry to append.
+
+        Raises:
+            ContextNotFoundError: If no journal file exists for the context.
+        """
         path = self._path(ctx_id)
         if not path.exists():
             raise ContextNotFoundError(ctx_id)
@@ -46,6 +73,20 @@ class JournalStore:
         logger.debug("appended %s entry to context %s", entry.t, ctx_id)
 
     def replay(self, ctx_id: str) -> list[dict[str, Any]]:
+        """Replay the journal from the last compaction marker.
+
+        Scans backwards for the most recent compaction entry and builds
+        an Anthropic-format ``messages[]`` array from that point forward.
+
+        Args:
+            ctx_id: The context identifier.
+
+        Returns:
+            List of message dicts suitable for the Anthropic Messages API.
+
+        Raises:
+            ContextNotFoundError: If no journal file exists for the context.
+        """
         path = self._path(ctx_id)
         if not path.exists():
             raise ContextNotFoundError(ctx_id)

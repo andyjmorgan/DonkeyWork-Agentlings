@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentlings.tools import ToolRegistry, ToolResult
+from agentlings.tools.registry import ToolRegistry, ToolResult
 
 
 @pytest.fixture

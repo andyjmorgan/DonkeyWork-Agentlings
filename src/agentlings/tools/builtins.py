@@ -1,108 +1,18 @@
+"""Built-in tool implementations: bash shell and filesystem operations."""
+
 from __future__ import annotations
 
-import asyncio
-import logging
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-logger = logging.getLogger(__name__)
+from agentlings.tools.registry import ToolResult
 
 DEFAULT_TIMEOUT = 30
 
-TOOL_GROUPS: dict[str, list[str]] = {
-    "bash": ["bash"],
-    "filesystem": [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_directory",
-        "search_files",
-    ],
-}
-
-
-@dataclass
-class ToolResult:
-    output: str
-    is_error: bool = False
-
-
-class ToolRegistry:
-    def __init__(self) -> None:
-        self._tools: dict[str, _ToolEntry] = {}
-
-    def register(
-        self,
-        name: str,
-        description: str,
-        input_schema: dict[str, Any],
-        execute_fn: Callable[..., ToolResult],
-    ) -> None:
-        self._tools[name] = _ToolEntry(
-            name=name,
-            description=description,
-            input_schema=input_schema,
-            execute_fn=execute_fn,
-        )
-        logger.info("registered tool: %s", name)
-
-    def list_schemas(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            }
-            for t in self._tools.values()
-        ]
-
-    def tool_names(self) -> list[str]:
-        return list(self._tools.keys())
-
-    async def execute(self, name: str, input_dict: dict[str, Any]) -> ToolResult:
-        entry = self._tools.get(name)
-        if entry is None:
-            return ToolResult(output=f"Unknown tool: {name}", is_error=True)
-
-        logger.debug("executing tool: %s", name)
-        fn = entry.execute_fn
-        if asyncio.iscoroutinefunction(fn):
-            return await fn(**input_dict)
-        return await asyncio.to_thread(fn, **input_dict)
-
-    def register_tools(self, enabled: list[str]) -> None:
-        resolved: set[str] = set()
-        for name in enabled:
-            if name in TOOL_GROUPS:
-                resolved.update(TOOL_GROUPS[name])
-            else:
-                resolved.add(name)
-
-        for tool_name in sorted(resolved):
-            if tool_name in _BUILTIN_REGISTRY:
-                defn = _BUILTIN_REGISTRY[tool_name]
-                self.register(
-                    name=defn["name"],
-                    description=defn["description"],
-                    input_schema=defn["input_schema"],
-                    execute_fn=defn["execute_fn"],
-                )
-            else:
-                logger.warning("unknown tool: %s", tool_name)
-
-
-@dataclass
-class _ToolEntry:
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    execute_fn: Callable[..., ToolResult]
-
 
 # ---------------------------------------------------------------------------
-# Built-in tool implementations
+# Tool implementations
 # ---------------------------------------------------------------------------
 
 
@@ -213,11 +123,11 @@ def _search_files(path: str, pattern: str) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Built-in tool registry
+# Registry mapping tool names to their definitions
 # ---------------------------------------------------------------------------
 
 
-_BUILTIN_REGISTRY: dict[str, dict[str, Any]] = {
+BUILTIN_REGISTRY: dict[str, dict[str, Any]] = {
     "bash": {
         "name": "bash",
         "description": "Execute a shell command and return its output.",

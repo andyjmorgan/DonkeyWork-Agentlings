@@ -1,3 +1,5 @@
+"""Message loop — the single entrance point for all agent interactions."""
+
 from __future__ import annotations
 
 import logging
@@ -6,22 +8,36 @@ from typing import Any
 from uuid import uuid4
 
 from agentlings.config import AgentConfig
-from agentlings.llm import BaseLLMClient
-from agentlings.models import CompactionEntry, MessageEntry
-from agentlings.prompt import build_system_prompt
-from agentlings.store import ContextNotFoundError, JournalStore
-from agentlings.tools import ToolRegistry
+from agentlings.core.llm import BaseLLMClient
+from agentlings.core.models import CompactionEntry, MessageEntry
+from agentlings.core.prompt import build_system_prompt
+from agentlings.core.store import JournalStore
+from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class LoopResult:
+    """Result of processing a message through the loop.
+
+    Attributes:
+        context_id: The conversation context identifier.
+        content: Anthropic-format content blocks from the final LLM response.
+    """
+
     context_id: str
     content: list[dict[str, Any]]
 
 
 class MessageLoop:
+    """Orchestrates the append-replay-complete-execute cycle.
+
+    Both A2A and MCP protocol handlers feed into this single entrance.
+    The loop appends user input to the JSONL journal, replays the conversation,
+    calls the LLM, executes any requested tools, and returns the final response.
+    """
+
     def __init__(
         self,
         config: AgentConfig,
@@ -42,6 +58,21 @@ class MessageLoop:
         stream: bool = False,
         via: str = "a2a",
     ) -> LoopResult:
+        """Process a user message and return the agent's response.
+
+        Creates a new context if none is provided, or continues an existing one.
+        Runs the LLM in a loop, executing tool calls until a terminal text
+        response is produced.
+
+        Args:
+            text: The user's message text.
+            context_id: Existing context ID to continue, or ``None`` for a new conversation.
+            stream: Whether to use streaming (not yet implemented).
+            via: Protocol that originated the request (``"a2a"`` or ``"mcp"``).
+
+        Returns:
+            The context ID and the final response content blocks.
+        """
         if context_id is None:
             context_id = str(uuid4())
             self._store.create(context_id)

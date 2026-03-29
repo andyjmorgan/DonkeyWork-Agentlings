@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentlings.llm import MockLLMClient, create_llm_client
+from agentlings.core.llm import MockLLMClient, create_llm_client
 
 
 class TestMockLLMClient:
@@ -68,7 +68,7 @@ class TestFactory:
         assert isinstance(client, MockLLMClient)
 
     def test_anthropic_backend(self) -> None:
-        from agentlings.llm import AnthropicLLMClient
+        from agentlings.core.llm import AnthropicLLMClient
 
         client = create_llm_client(backend="anthropic", api_key="sk-test")
         assert isinstance(client, AnthropicLLMClient)

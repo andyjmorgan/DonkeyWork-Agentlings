@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from agentlings.models import CompactionEntry, MessageEntry
-from agentlings.store import ContextNotFoundError, JournalStore
+from agentlings.core.models import CompactionEntry, MessageEntry
+from agentlings.core.store import ContextNotFoundError, JournalStore
 
 
 @pytest.fixture

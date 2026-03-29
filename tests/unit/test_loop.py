@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from agentlings.config import AgentConfig
-from agentlings.llm import MockLLMClient
-from agentlings.loop import MessageLoop
-from agentlings.store import ContextNotFoundError, JournalStore
-from agentlings.tools import ToolRegistry
+from agentlings.core.llm import MockLLMClient
+from agentlings.core.loop import MessageLoop
+from agentlings.core.store import JournalStore
+from agentlings.tools.registry import ToolRegistry
 
 
 @pytest.fixture

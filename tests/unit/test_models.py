@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentlings.models import (
+from agentlings.core.models import (
     CompactionEntry,
     MessageEntry,
 )
