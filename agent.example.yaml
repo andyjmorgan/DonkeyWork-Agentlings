@@ -1,0 +1,20 @@
+name: my-agentling
+description: A helpful AI assistant
+
+tools:
+  - bash
+  - filesystem
+
+skills:
+  - id: general
+    name: General Assistant
+    description: Answer questions and help with tasks
+    tags: [general, assistant]
+
+system_prompt: |
+  You are a helpful AI assistant.
+
+  Use the tools available to you to accomplish tasks. When a tool returns output,
+  incorporate it into your response.
+
+  Be concise. Use code blocks for command output.

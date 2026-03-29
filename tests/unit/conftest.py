@@ -16,15 +16,27 @@ def tmp_data_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def test_config(tmp_data_dir: Path) -> AgentConfig:
+def test_config(tmp_data_dir: Path, tmp_path: Path) -> AgentConfig:
+    agent_yaml = tmp_path / "agent.yaml"
+    agent_yaml.write_text(
+        "name: test-agent\n"
+        "description: A test agent\n"
+        "tools:\n"
+        "  - bash\n"
+        "  - filesystem\n"
+        "skills:\n"
+        "  - id: testing\n"
+        "    name: Testing\n"
+        "    description: A test skill\n"
+        "    tags: [test]\n"
+        "system_prompt: You are a test agent.\n"
+    )
     return AgentConfig(
         anthropic_api_key="test-key",
         agent_api_key="test-agent-key",
         agent_data_dir=tmp_data_dir,
         agent_llm_backend="mock",
-        agent_name="test-agent",
-        agent_description="A test agent",
-        agent_tools="bash,filesystem",
+        agent_config=str(agent_yaml),
     )
 
 

@@ -49,16 +49,22 @@ def _server(base_url: str, api_key: str, tmp_path_factory):
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
     data_dir = tmp_path_factory.mktemp("data")
+    agent_yaml = tmp_path_factory.mktemp("config") / "agent.yaml"
+    agent_yaml.write_text(
+        "name: test-agent\n"
+        "description: A test agent\n"
+        "tools:\n"
+        "  - bash\n"
+        "  - filesystem\n"
+    )
     config = AgentConfig(
         anthropic_api_key="not-used",
         agent_api_key=api_key,
         agent_data_dir=data_dir,
         agent_llm_backend="mock",
-        agent_name="test-agent",
-        agent_description="A test agent",
         agent_host="127.0.0.1",
         agent_port=port,
-        agent_tools="bash,filesystem",
+        agent_config=str(agent_yaml),
     )
     app = _create_app(config)
 
