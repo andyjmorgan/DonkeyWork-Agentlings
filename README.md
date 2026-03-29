@@ -12,24 +12,152 @@
 
 ---
 
-Each agentling is a small, focused AI agent whose identity is defined by configuration — name, description, system prompt, and tools — not code. The framework handles protocol compliance, conversation journaling, and context management. The LLM is the agent; the framework records and replays.
+Each agentling is a small, focused AI agent whose identity is defined by a YAML config file — name, description, system prompt, tools, and skills. The framework handles protocol compliance, conversation journaling, and context management. The LLM is the agent; the framework records and replays.
 
 ## Quick start
 
 ```bash
 pip install -e ".[dev]"
 
+# Create your agent definition
+cp agent.example.yaml agent.yaml
+
 # Run with mock LLM (no API key needed)
-AGENT_LLM_BACKEND=mock AGENT_API_KEY=dev agentling
+AGENT_CONFIG=./agent.yaml AGENT_LLM_BACKEND=mock AGENT_API_KEY=dev agentling
 
 # Run with Anthropic
-ANTHROPIC_API_KEY=sk-ant-... AGENT_API_KEY=your-key agentling
+AGENT_CONFIG=./agent.yaml ANTHROPIC_API_KEY=sk-ant-... AGENT_API_KEY=your-key agentling
+
+# See available tools
+agentling --list-tools
 ```
 
 The agent serves:
 - `GET /.well-known/agent-card.json` — A2A Agent Card (public, no auth)
 - `POST /a2a` — A2A JSON-RPC endpoint
 - `POST /mcp` — MCP Streamable HTTP endpoint
+
+## Running as a daemon
+
+### systemd (Linux)
+
+Create `/etc/systemd/system/agentling.service`:
+
+```ini
+[Unit]
+Description=Agentling
+After=network.target
+
+[Service]
+Type=simple
+User=agentling
+WorkingDirectory=/opt/agentling
+EnvironmentFile=/opt/agentling/.env
+ExecStart=/opt/agentling/venv/bin/agentling
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# Set up
+sudo useradd -r -s /bin/false agentling
+sudo mkdir -p /opt/agentling
+sudo python3 -m venv /opt/agentling/venv
+sudo /opt/agentling/venv/bin/pip install agentlings
+
+# Copy your config
+sudo cp agent.yaml /opt/agentling/agent.yaml
+sudo cp .env /opt/agentling/.env    # ANTHROPIC_API_KEY, AGENT_API_KEY, AGENT_CONFIG=./agent.yaml
+
+# Start
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentling
+sudo journalctl -u agentling -f
+```
+
+### launchd (macOS)
+
+Create `~/Library/LaunchAgents/com.donkeywork.agentling.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.donkeywork.agentling</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/venv/bin/agentling</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/agentling</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AGENT_CONFIG</key>
+        <string>./agent.yaml</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>sk-ant-...</string>
+        <key>AGENT_API_KEY</key>
+        <string>your-key</string>
+    </dict>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentling.err</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.donkeywork.agentling.plist
+tail -f /tmp/agentling.err
+```
+
+## Agent definition
+
+Agent identity lives in a YAML file (`agent.yaml`):
+
+```yaml
+name: k3s-agentling
+description: A k3s cluster management agent
+
+tools:
+  - bash
+  - filesystem
+
+skills:
+  - id: k8s-ops
+    name: Kubernetes Operations
+    description: Manage cluster resources, diagnose issues, apply manifests
+    tags: [kubernetes, k3s, devops]
+  - id: file-management
+    name: File Management
+    description: Read, write, and search configuration files
+    tags: [files, yaml]
+
+system_prompt: |
+  You are a DevOps engineer managing a k3s Kubernetes cluster.
+
+  All configuration changes go through /mnt/lab/k3s as the source of truth.
+  Never use kubectl patch/edit/set directly — write manifests and apply them.
+
+  Before any destructive operation, describe the impact and ask for confirmation.
+```
+
+Point to it with `AGENT_CONFIG=./agent.yaml`.
+
+### Available tools
+
+| Group | Tools | Description |
+|-------|-------|-------------|
+| `bash` | `bash` | Shell command execution with timeout |
+| `filesystem` | `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files` | File operations with offset/limit, find-and-replace, glob search |
+
+Tools are off by default. Run `agentling --list-tools` for details.
 
 ## Docker
 
@@ -38,12 +166,13 @@ docker build -t agentling:latest .
 docker run -e AGENT_API_KEY=your-key -e AGENT_LLM_BACKEND=mock -p 8420:8420 agentling
 ```
 
-## Configuration
+## Environment variables
 
-All via environment variables (or `.env` file):
+Secrets and runtime settings stay in env vars (or `.env` file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `AGENT_CONFIG` | — | Path to agent YAML definition |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (required for real LLM) |
 | `AGENT_API_KEY` | — | API key for authenticating clients |
 | `AGENT_MODEL` | `claude-sonnet-4-6` | Anthropic model ID |
@@ -51,11 +180,9 @@ All via environment variables (or `.env` file):
 | `AGENT_HOST` | `0.0.0.0` | Bind address |
 | `AGENT_PORT` | `8420` | Bind port |
 | `AGENT_DATA_DIR` | `./data` | JSONL journal storage directory |
-| `AGENT_NAME` | `agentling` | Agent identity (used in Agent Card + MCP tool) |
-| `AGENT_DESCRIPTION` | `A lightweight AI agent` | Agent description |
-| `AGENT_SYSTEM_PROMPT_FILE` | — | Path to custom system prompt (overrides default) |
 | `AGENT_LOG_LEVEL` | `INFO` | Log level |
 | `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` or `mock` |
+| `AGENT_EXTERNAL_URL` | — | Public URL for Agent Card (needed in Docker/k8s) |
 
 ## Architecture
 

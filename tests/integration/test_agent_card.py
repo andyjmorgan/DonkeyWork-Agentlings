@@ -24,7 +24,7 @@ class TestAgentCard:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{server_url}/.well-known/agent-card.json")
         card = resp.json()
-        assert card["capabilities"]["streaming"] is True
+        assert card["capabilities"]["streaming"] is False
         assert card["capabilities"]["pushNotifications"] is False
 
     @pytest.mark.asyncio

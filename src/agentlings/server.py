@@ -76,7 +76,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
 
     if not tools.tool_names():
         logger.warning(
-            "no tools enabled — set AGENT_TOOLS to enable tools "
+            "no tools enabled — add tools to agent.yaml or set AGENT_CONFIG "
             "(run 'agentling --list-tools' to see available options)"
         )
 
