@@ -1,3 +1,5 @@
+"""Starlette application wiring A2A and MCP protocol endpoints on a single HTTP server."""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,15 +19,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from agentlings.a2a_handler import AgentlingExecutor
-from agentlings.agent_card import generate_agent_card
 from agentlings.config import AgentConfig
-from agentlings.llm import create_llm_client
+from agentlings.core.llm import create_llm_client
+from agentlings.core.loop import MessageLoop
+from agentlings.core.store import JournalStore
 from agentlings.log import setup_logging
-from agentlings.loop import MessageLoop
-from agentlings.mcp_handler import create_mcp_server
-from agentlings.store import JournalStore
-from agentlings.tools import ToolRegistry
+from agentlings.protocol.a2a import AgentlingExecutor
+from agentlings.protocol.agent_card import generate_agent_card
+from agentlings.protocol.mcp import create_mcp_server
+from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +38,22 @@ _PUBLIC_PATHS = {
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Middleware that enforces ``X-API-Key`` header authentication on non-public paths."""
+
     def __init__(self, app: Any, api_key: str) -> None:
         super().__init__(app)
         self._api_key = api_key
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
+        """Check the API key header and reject unauthorized requests.
+
+        Args:
+            request: The incoming HTTP request.
+            call_next: Callable to pass the request to the next middleware or route.
+
+        Returns:
+            The downstream response, or a 401 JSON response if unauthorized.
+        """
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
 
@@ -141,6 +154,11 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
 
 
 def run(config: AgentConfig | None = None) -> None:
+    """Build the application and start the uvicorn server.
+
+    Args:
+        config: Optional agent configuration; defaults are loaded from the environment.
+    """
     if config is None:
         config = AgentConfig()
 

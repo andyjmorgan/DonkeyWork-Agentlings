@@ -1,3 +1,5 @@
+"""Agent Card generation from configuration."""
+
 from __future__ import annotations
 
 from a2a.types import (
@@ -11,6 +13,17 @@ from agentlings.config import AgentConfig
 
 
 def generate_agent_card(config: AgentConfig) -> AgentCard:
+    """Generate an A2A Agent Card from the agent's configuration.
+
+    The Agent Card is the single source of truth for agent identity.
+    The MCP tool schema is derived from it.
+
+    Args:
+        config: The agent configuration.
+
+    Returns:
+        A fully populated ``AgentCard`` instance.
+    """
     if config.agent_external_url:
         url = config.agent_external_url.rstrip("/") + "/a2a"
     else:

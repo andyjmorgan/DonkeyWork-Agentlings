@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentlings.agent_card import generate_agent_card
+from agentlings.protocol.agent_card import generate_agent_card
 from agentlings.config import AgentConfig
 
 

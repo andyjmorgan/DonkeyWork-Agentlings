@@ -1,15 +1,16 @@
+"""MCP protocol server exposing the agentling as a single tool."""
+
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
 
+from a2a.types import AgentCard
 from mcp.server.lowlevel import Server
 from mcp.types import TextContent, Tool
 
-from a2a.types import AgentCard
-
-from agentlings.loop import MessageLoop
+from agentlings.core.loop import MessageLoop
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,18 @@ def create_mcp_server(
     loop: MessageLoop,
     agent_card: AgentCard,
 ) -> Server:
+    """Create an MCP server with a single tool derived from the Agent Card.
+
+    The tool accepts a natural language message and an optional context ID
+    for multi-turn conversations, delegating to the shared message loop.
+
+    Args:
+        loop: The message loop to forward requests to.
+        agent_card: The agent card whose name and description define the tool.
+
+    Returns:
+        A configured MCP ``Server`` instance.
+    """
     server = Server(agent_card.name)
 
     tool = Tool(

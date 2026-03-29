@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from agentlings.config import AgentConfig
-from agentlings.models import CompactionEntry, MessageEntry
+from agentlings.core.models import CompactionEntry, MessageEntry
 
 
 @pytest.fixture

@@ -10,16 +10,23 @@ Agentlings — a lightweight single-process Python framework for running AI agen
 
 Two protocol interfaces (A2A JSON-RPC at `/a2a`, MCP Streamable HTTP at `/mcp`) feed into a shared message loop. The loop appends to a per-context JSONL journal, replays from the last compaction marker, calls the Anthropic Messages API with `compact_20260112`, and executes tools in a loop until the LLM produces a terminal text response.
 
-Key modules under `src/agentlings/`:
+Package structure under `src/agentlings/`:
 - `config.py` — Pydantic BaseSettings, all config via env vars + `.env`
-- `models.py` — A2A types, JSON-RPC envelope, JSONL journal entries, Agent Card
-- `store.py` — JSONL append/replay with compaction cursor
-- `loop.py` — single `process_message(text, context_id, stream)` entrance
-- `llm.py` — Anthropic API wrapper (sync + streaming), compaction extraction
-- `tools.py` — pluggable tool registry, built-in defaults: `shell`, `read_file`, `write_file`
-- `a2a_handler.py` — JSON-RPC dispatch for `message/send` and `message/stream`
-- `mcp_handler.py` — MCP Streamable HTTP via `mcp` SDK, single tool derived from Agent Card
-- `server.py` — Starlette app, route mounting, API key auth middleware
+- `log.py` — console-first logging setup
+- `server.py` — Starlette app wiring A2A + MCP routes, API key middleware
+- `core/` — message loop engine
+  - `loop.py` — single `process_message()` entrance point
+  - `llm.py` — LLM client abstraction (Anthropic + mock backends)
+  - `store.py` — JSONL append/replay with compaction cursor
+  - `models.py` — JSONL journal entry types
+  - `prompt.py` — system prompt builder
+- `protocol/` — protocol adapters
+  - `a2a.py` — `AgentlingExecutor` bridging A2A SDK to message loop
+  - `mcp.py` — MCP server with single tool derived from Agent Card
+  - `agent_card.py` — Agent Card generation from config
+- `tools/` — pluggable tool system
+  - `registry.py` — `ToolRegistry` with group-based registration
+  - `builtins.py` — bash and filesystem tool implementations
 
 The Agent Card at `/.well-known/agent.json` is the single source of truth — the MCP tool schema is derived from it.
 

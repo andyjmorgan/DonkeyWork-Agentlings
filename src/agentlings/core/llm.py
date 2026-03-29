@@ -1,3 +1,5 @@
+"""LLM client abstraction with Anthropic and mock backends."""
+
 from __future__ import annotations
 
 import logging
@@ -11,18 +13,38 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMResponse:
+    """Container for an LLM completion response.
+
+    Attributes:
+        content: List of content blocks (text, tool_use, etc.) from the model.
+        stop_reason: Why the model stopped generating (e.g. ``"end_turn"``, ``"tool_use"``).
+    """
+
     content: list[dict[str, Any]]
     stop_reason: str | None = None
 
 
 class BaseLLMClient(ABC):
+    """Abstract interface for LLM completion backends."""
+
     @abstractmethod
     async def complete(
         self,
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-    ) -> LLMResponse: ...
+    ) -> LLMResponse:
+        """Send a completion request and return the full response.
+
+        Args:
+            system: System prompt blocks.
+            messages: Conversation message history.
+            tools: Tool schemas available to the model.
+
+        Returns:
+            The model's response content and stop reason.
+        """
+        ...
 
     @abstractmethod
     async def stream(
@@ -30,10 +52,23 @@ class BaseLLMClient(ABC):
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-    ) -> AsyncIterator[dict[str, Any]]: ...
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream completion response blocks incrementally.
+
+        Args:
+            system: System prompt blocks.
+            messages: Conversation message history.
+            tools: Tool schemas available to the model.
+
+        Yields:
+            Individual content blocks as they arrive.
+        """
+        ...
 
 
 class AnthropicLLMClient(BaseLLMClient):
+    """LLM client backed by the Anthropic Messages API."""
+
     def __init__(self, api_key: str, model: str, max_tokens: int) -> None:
         import anthropic
 
@@ -73,6 +108,13 @@ class AnthropicLLMClient(BaseLLMClient):
 
 
 class MockLLMClient(BaseLLMClient):
+    """Deterministic mock LLM client for testing without API calls.
+
+    Returns canned responses based on pattern matching:
+    tool name in input triggers tool_use, tool results get text replies,
+    everything else gets an echo response.
+    """
+
     def __init__(
         self,
         tool_names: list[str] | None = None,
@@ -133,6 +175,18 @@ def create_llm_client(
     max_tokens: int = 4096,
     tool_names: list[str] | None = None,
 ) -> BaseLLMClient:
+    """Factory that returns the appropriate LLM client for the given backend.
+
+    Args:
+        backend: Either ``"anthropic"`` for the real API or ``"mock"`` for testing.
+        api_key: Anthropic API key (required for ``"anthropic"`` backend).
+        model: Model identifier to use for completions.
+        max_tokens: Maximum tokens in the model response.
+        tool_names: Tool names the mock backend should recognize.
+
+    Returns:
+        A configured LLM client instance.
+    """
     if backend == "mock":
         logger.info("using mock LLM backend")
         return MockLLMClient(tool_names=tool_names)

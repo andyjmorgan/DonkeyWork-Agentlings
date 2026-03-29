@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentlings.config import AgentConfig
-from agentlings.prompt import build_system_prompt
+from agentlings.core.prompt import build_system_prompt
 
 
 def test_default_prompt_includes_name(test_config: AgentConfig) -> None:
