@@ -118,10 +118,15 @@ def _bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
         output = result.stdout
         if result.stderr:
             output += result.stderr
-        return ToolResult(
-            output=output.strip(),
-            is_error=result.returncode != 0,
-        )
+        output = output.strip()
+        is_error = result.returncode != 0
+        if not output:
+            output = (
+                f"Command failed with exit code {result.returncode}"
+                if is_error
+                else "(no output)"
+            )
+        return ToolResult(output=output, is_error=is_error)
     except subprocess.TimeoutExpired:
         return ToolResult(
             output=f"Command timed out after {timeout} seconds",
