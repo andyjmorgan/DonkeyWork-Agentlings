@@ -27,8 +27,15 @@ class AgentConfig(BaseSettings):
     agent_log_level: str = "INFO"
     agent_llm_backend: Literal["anthropic", "mock"] = "anthropic"
     agent_external_url: str | None = None
+    agent_tools: str = ""
 
     @model_validator(mode="after")
     def _ensure_data_dir(self) -> AgentConfig:
         self.agent_data_dir.mkdir(parents=True, exist_ok=True)
         return self
+
+    @property
+    def enabled_tools(self) -> list[str]:
+        if not self.agent_tools:
+            return []
+        return [t.strip() for t in self.agent_tools.split(",") if t.strip()]

@@ -15,7 +15,7 @@ from agentlings.tools import ToolRegistry
 def loop_deps(tmp_data_dir: Path, test_config: AgentConfig):
     store = JournalStore(tmp_data_dir)
     tools = ToolRegistry()
-    tools.register_builtins()
+    tools.register_tools(["bash", "filesystem"])
     llm = MockLLMClient(tool_names=tools.tool_names())
     loop = MessageLoop(config=test_config, store=store, llm=llm, tools=tools)
     return loop, store
@@ -53,7 +53,7 @@ class TestProcessMessage:
     @pytest.mark.asyncio
     async def test_tool_execution_flow(self, loop_deps) -> None:
         loop, store = loop_deps
-        result = await loop.process_message("run shell echo test")
+        result = await loop.process_message("run bash echo test")
         assert result.context_id is not None
         messages = store.replay(result.context_id)
         assert len(messages) >= 3

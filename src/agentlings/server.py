@@ -59,7 +59,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
 
     store = JournalStore(config.agent_data_dir)
     tools = ToolRegistry()
-    tools.register_builtins()
+    tools.register_tools(config.enabled_tools)
 
     llm = create_llm_client(
         backend=config.agent_llm_backend,

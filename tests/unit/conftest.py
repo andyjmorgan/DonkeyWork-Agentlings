@@ -24,6 +24,7 @@ def test_config(tmp_data_dir: Path) -> AgentConfig:
         agent_llm_backend="mock",
         agent_name="test-agent",
         agent_description="A test agent",
+        agent_tools="bash,filesystem",
     )
 
 

@@ -5,7 +5,6 @@ import logging
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import Message, Part, Role, TextPart
 from a2a.utils import new_agent_text_message
 
 from agentlings.loop import MessageLoop
@@ -22,6 +21,12 @@ class AgentlingExecutor(AgentExecutor):
     ) -> None:
         user_text = context.get_user_input()
         context_id = context.context_id
+
+        logger.debug(
+            "execute called: context_id=%s, user_text=%s",
+            context_id,
+            user_text[:100] if user_text else "",
+        )
 
         try:
             result = await self._loop.process_message(
@@ -43,6 +48,12 @@ class AgentlingExecutor(AgentExecutor):
         response_text = _extract_text(result.content)
         response_msg = new_agent_text_message(
             response_text, context_id=result.context_id
+        )
+
+        logger.debug(
+            "returning response: context_id=%s, text=%s",
+            result.context_id,
+            response_text[:100] if response_text else "",
         )
 
         await event_queue.enqueue_event(response_msg)
