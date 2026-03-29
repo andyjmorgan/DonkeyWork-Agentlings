@@ -1,3 +1,5 @@
+"""Pluggable tool registry with built-in filesystem and shell tool implementations."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,11 +27,19 @@ TOOL_GROUPS: dict[str, list[str]] = {
 
 @dataclass
 class ToolResult:
+    """Result of executing a tool.
+
+    Attributes:
+        output: The tool's output text.
+        is_error: Whether the execution resulted in an error.
+    """
+
     output: str
     is_error: bool = False
 
 
 class ToolRegistry:
+    """Registry for tools the agent can invoke during LLM completion loops."""
     def __init__(self) -> None:
         self._tools: dict[str, _ToolEntry] = {}
 
@@ -40,6 +50,14 @@ class ToolRegistry:
         input_schema: dict[str, Any],
         execute_fn: Callable[..., ToolResult],
     ) -> None:
+        """Register a tool with its schema and execution function.
+
+        Args:
+            name: Unique tool identifier.
+            description: Human-readable description for the LLM.
+            input_schema: JSON Schema describing the tool's input parameters.
+            execute_fn: Callable that performs the tool's action and returns a ToolResult.
+        """
         self._tools[name] = _ToolEntry(
             name=name,
             description=description,
@@ -49,6 +67,7 @@ class ToolRegistry:
         logger.info("registered tool: %s", name)
 
     def list_schemas(self) -> list[dict[str, Any]]:
+        """Return tool schemas in the format expected by the LLM API."""
         return [
             {
                 "name": t.name,
@@ -59,9 +78,19 @@ class ToolRegistry:
         ]
 
     def tool_names(self) -> list[str]:
+        """Return the names of all registered tools."""
         return list(self._tools.keys())
 
     async def execute(self, name: str, input_dict: dict[str, Any]) -> ToolResult:
+        """Execute a registered tool by name.
+
+        Args:
+            name: The tool to execute.
+            input_dict: Keyword arguments to pass to the tool function.
+
+        Returns:
+            The tool's result, or an error result if the tool is unknown.
+        """
         entry = self._tools.get(name)
         if entry is None:
             return ToolResult(output=f"Unknown tool: {name}", is_error=True)
@@ -73,6 +102,12 @@ class ToolRegistry:
         return await asyncio.to_thread(fn, **input_dict)
 
     def register_tools(self, enabled: list[str]) -> None:
+        """Register built-in tools by name or group.
+
+        Args:
+            enabled: List of tool names or group names (e.g. "bash", "filesystem")
+                     to activate from the built-in registry.
+        """
         resolved: set[str] = set()
         for name in enabled:
             if name in TOOL_GROUPS:

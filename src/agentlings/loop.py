@@ -1,3 +1,5 @@
+"""Core message loop that drives LLM completion and tool execution cycles."""
+
 from __future__ import annotations
 
 import logging
@@ -17,11 +19,23 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LoopResult:
+    """Result of processing a message through the loop.
+
+    Attributes:
+        context_id: The conversation context identifier.
+        content: Response content blocks from the LLM.
+    """
     context_id: str
     content: list[dict[str, Any]]
 
 
 class MessageLoop:
+    """Orchestrates the LLM completion and tool-use cycle for a conversation.
+
+    Appends all messages to a JSONL journal, replays context for each LLM call,
+    and loops on tool-use responses until the model produces a terminal text reply.
+    """
+
     def __init__(
         self,
         config: AgentConfig,
@@ -42,6 +56,20 @@ class MessageLoop:
         stream: bool = False,
         via: str = "a2a",
     ) -> LoopResult:
+        """Process a user message and return the agent's final response.
+
+        Creates a new context if none is provided. Runs the LLM in a loop,
+        executing any requested tools, until the model returns a text response.
+
+        Args:
+            text: The user's message text.
+            context_id: Existing conversation context ID, or None to create one.
+            stream: Whether to use streaming (currently unused).
+            via: Protocol the message arrived through ("a2a" or "mcp").
+
+        Returns:
+            The context ID and final response content blocks.
+        """
         if context_id is None:
             context_id = str(uuid4())
             self._store.create(context_id)

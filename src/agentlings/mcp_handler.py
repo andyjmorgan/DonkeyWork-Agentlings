@@ -1,3 +1,5 @@
+"""MCP server that exposes the agent as a single tool via Streamable HTTP."""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +20,18 @@ def create_mcp_server(
     loop: MessageLoop,
     agent_card: AgentCard,
 ) -> Server:
+    """Create an MCP server with a single tool derived from the agent card.
+
+    The tool accepts a natural-language message and optional context ID,
+    forwarding requests through the shared message loop.
+
+    Args:
+        loop: The message loop to process incoming requests.
+        agent_card: Agent card used to derive the tool name, description, and schema.
+
+    Returns:
+        A configured MCP Server instance.
+    """
     server = Server(agent_card.name)
 
     tool = Tool(

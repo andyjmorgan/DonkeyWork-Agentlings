@@ -1,3 +1,5 @@
+"""Agent configuration loaded from environment variables and ``.env`` files."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AgentConfig(BaseSettings):
+    """Configuration for an agentling instance.
+
+    All settings are populated from environment variables (optionally via a ``.env`` file).
+    """
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -36,6 +42,7 @@ class AgentConfig(BaseSettings):
 
     @property
     def enabled_tools(self) -> list[str]:
+        """Comma-separated ``AGENT_TOOLS`` value parsed into individual tool names."""
         if not self.agent_tools:
             return []
         return [t.strip() for t in self.agent_tools.split(",") if t.strip()]

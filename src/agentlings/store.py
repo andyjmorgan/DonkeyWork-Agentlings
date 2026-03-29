@@ -1,3 +1,5 @@
+"""Append-only JSONL journal store for conversation persistence."""
+
 from __future__ import annotations
 
 import fcntl
@@ -12,10 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 class ContextNotFoundError(Exception):
-    pass
+    """Raised when an operation targets a context ID that does not exist on disk."""
 
 
 class JournalStore:
+    """File-backed store that persists conversation entries as JSONL.
+
+    Each conversation context is stored in a separate ``.jsonl`` file.
+    Entries are append-only; compaction markers serve as replay cursors.
+    """
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -24,14 +31,33 @@ class JournalStore:
         return self._data_dir / f"{ctx_id}.jsonl"
 
     def create(self, ctx_id: str) -> None:
+        """Create a new empty journal file for the given context.
+
+        Args:
+            ctx_id: The context identifier.
+        """
         path = self._path(ctx_id)
         path.touch(exist_ok=True)
         logger.info("created context %s", ctx_id)
 
     def exists(self, ctx_id: str) -> bool:
+        """Check whether a journal file exists for the given context.
+
+        Args:
+            ctx_id: The context identifier.
+        """
         return self._path(ctx_id).exists()
 
     def append(self, ctx_id: str, entry: MessageEntry | CompactionEntry) -> None:
+        """Append a journal entry to the context's JSONL file.
+
+        Args:
+            ctx_id: The context identifier.
+            entry: The message or compaction entry to persist.
+
+        Raises:
+            ContextNotFoundError: If no journal file exists for the context.
+        """
         path = self._path(ctx_id)
         if not path.exists():
             raise ContextNotFoundError(ctx_id)
@@ -46,6 +72,17 @@ class JournalStore:
         logger.debug("appended %s entry to context %s", entry.t, ctx_id)
 
     def replay(self, ctx_id: str) -> list[dict[str, Any]]:
+        """Replay the conversation history from the last compaction marker.
+
+        Args:
+            ctx_id: The context identifier.
+
+        Returns:
+            A list of message dicts suitable for passing to the LLM.
+
+        Raises:
+            ContextNotFoundError: If no journal file exists for the context.
+        """
         path = self._path(ctx_id)
         if not path.exists():
             raise ContextNotFoundError(ctx_id)

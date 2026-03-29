@@ -1,3 +1,5 @@
+"""A2A protocol executor that bridges incoming agent-to-agent requests into the message loop."""
+
 from __future__ import annotations
 
 import logging
@@ -13,12 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 class AgentlingExecutor(AgentExecutor):
+    """Executes A2A requests by forwarding user input through the shared message loop."""
+
     def __init__(self, loop: MessageLoop) -> None:
         self._loop = loop
 
     async def execute(
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
+        """Process an incoming A2A request and enqueue the agent's response.
+
+        Args:
+            context: The A2A request context containing user input and context ID.
+            event_queue: Queue for sending response events back to the caller.
+        """
         user_text = context.get_user_input()
         context_id = context.context_id
 
@@ -62,6 +72,12 @@ class AgentlingExecutor(AgentExecutor):
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
+        """Handle cancellation requests. Currently unsupported.
+
+        Args:
+            context: The A2A request context.
+            event_queue: Queue for sending response events back to the caller.
+        """
         await event_queue.enqueue_event(
             new_agent_text_message(
                 "Cancellation is not supported.",

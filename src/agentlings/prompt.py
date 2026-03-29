@@ -1,3 +1,5 @@
+"""System prompt construction from configuration or file."""
+
 from __future__ import annotations
 
 import logging
@@ -10,6 +12,17 @@ logger = logging.getLogger(__name__)
 
 
 def build_system_prompt(config: AgentConfig) -> list[dict[str, Any]]:
+    """Build the system prompt blocks for the LLM.
+
+    Loads from a file if ``agent_system_prompt_file`` is set, otherwise
+    generates a default prompt from the agent's name and description.
+
+    Args:
+        config: Agent configuration with prompt settings.
+
+    Returns:
+        A list of system prompt content blocks with cache control.
+    """
     if config.agent_system_prompt_file:
         path = Path(config.agent_system_prompt_file)
         text = path.read_text(encoding="utf-8")
