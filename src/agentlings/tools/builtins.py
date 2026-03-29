@@ -17,6 +17,15 @@ DEFAULT_TIMEOUT = 30
 
 
 def _bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
+    """Execute a shell command and capture its output.
+
+    Args:
+        command: The shell command string to execute.
+        timeout: Maximum seconds to wait before killing the process.
+
+    Returns:
+        Combined stdout/stderr on success, or a descriptive error message.
+    """
     try:
         result = subprocess.run(
             command,
@@ -45,6 +54,16 @@ def _bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
 
 
 def _read_file(path: str, offset: int = 0, limit: int = 2000) -> ToolResult:
+    """Read a text file and return its contents with line numbers.
+
+    Args:
+        path: Path to the file to read.
+        offset: Zero-based line number to start reading from.
+        limit: Maximum number of lines to return.
+
+    Returns:
+        Numbered lines of the file, with a truncation notice if applicable.
+    """
     try:
         p = Path(path)
         lines = p.read_text(encoding="utf-8").splitlines()
@@ -59,6 +78,12 @@ def _read_file(path: str, offset: int = 0, limit: int = 2000) -> ToolResult:
 
 
 def _write_file(path: str, content: str) -> ToolResult:
+    """Write content to a file, creating or overwriting as needed.
+
+    Args:
+        path: Path to the file to write.
+        content: The text content to write.
+    """
     try:
         Path(path).write_text(content, encoding="utf-8")
         return ToolResult(output=f"Written {len(content)} bytes to {path}")
@@ -69,6 +94,17 @@ def _write_file(path: str, content: str) -> ToolResult:
 def _edit_file(
     path: str, old_text: str, new_text: str, replace_all: bool = False
 ) -> ToolResult:
+    """Find and replace text in a file.
+
+    Fails if ``old_text`` is not found. If it matches multiple times,
+    fails unless ``replace_all`` is set.
+
+    Args:
+        path: Path to the file to edit.
+        old_text: Exact text to find.
+        new_text: Replacement text.
+        replace_all: If true, replace all occurrences instead of requiring a unique match.
+    """
     try:
         p = Path(path)
         content = p.read_text(encoding="utf-8")
@@ -95,6 +131,11 @@ def _edit_file(
 
 
 def _list_directory(path: str = ".") -> ToolResult:
+    """List directory contents with ``[DIR]`` and ``[FILE]`` prefixes.
+
+    Args:
+        path: Path to the directory to list. Defaults to the current directory.
+    """
     try:
         p = Path(path)
         if not p.is_dir():
@@ -112,6 +153,12 @@ def _list_directory(path: str = ".") -> ToolResult:
 
 
 def _search_files(path: str, pattern: str) -> ToolResult:
+    """Recursively search for files matching a glob pattern.
+
+    Args:
+        path: Root directory to search from.
+        pattern: Glob pattern to match (e.g. ``"*.py"``, ``"**/*.json"``).
+    """
     try:
         p = Path(path)
         matches = sorted(str(m) for m in p.rglob(pattern))
