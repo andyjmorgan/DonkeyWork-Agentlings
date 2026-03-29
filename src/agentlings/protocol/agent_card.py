@@ -41,7 +41,7 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
                 tags=[],
             )
         ],
-        capabilities=AgentCapabilities(streaming=True, pushNotifications=False),
+        capabilities=AgentCapabilities(streaming=False, pushNotifications=False),
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         securitySchemes={

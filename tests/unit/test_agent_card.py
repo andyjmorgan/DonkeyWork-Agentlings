@@ -13,7 +13,7 @@ def test_generated_card_fields(test_config: AgentConfig) -> None:
 
 def test_generated_card_capabilities(test_config: AgentConfig) -> None:
     card = generate_agent_card(test_config)
-    assert card.capabilities.streaming is True
+    assert card.capabilities.streaming is False
     assert card.capabilities.push_notifications is False
 
 
