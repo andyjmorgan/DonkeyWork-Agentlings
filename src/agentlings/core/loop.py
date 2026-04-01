@@ -8,7 +8,9 @@ from typing import Any
 from uuid import uuid4
 
 from agentlings.config import AgentConfig
+from agentlings.core.completion import CompletionResult, run_completion
 from agentlings.core.llm import BaseLLMClient
+from agentlings.core.memory_store import MemoryFileStore
 from agentlings.core.models import CompactionEntry, MessageEntry
 from agentlings.core.prompt import build_system_prompt
 from agentlings.core.store import JournalStore
@@ -35,7 +37,7 @@ class MessageLoop:
 
     Both A2A and MCP protocol handlers feed into this single entrance.
     The loop appends user input to the JSONL journal, replays the conversation,
-    calls the LLM, executes any requested tools, and returns the final response.
+    calls the LLM via the shared completion cycle, and journals the results.
     """
 
     def __init__(
@@ -44,12 +46,13 @@ class MessageLoop:
         store: JournalStore,
         llm: BaseLLMClient,
         tools: ToolRegistry,
+        memory_store: MemoryFileStore | None = None,
     ) -> None:
         self._config = config
         self._store = store
         self._llm = llm
         self._tools = tools
-        self._system = build_system_prompt(config)
+        self._memory_store = memory_store
 
     async def process_message(
         self,
@@ -61,8 +64,7 @@ class MessageLoop:
         """Process a user message and return the agent's response.
 
         Creates a new context if none is provided, or continues an existing one.
-        Runs the LLM in a loop, executing tool calls until a terminal text
-        response is produced.
+        Delegates LLM interaction to ``run_completion`` and journals every turn.
 
         Args:
             text: The user's message text.
@@ -91,72 +93,63 @@ class MessageLoop:
             ),
         )
 
+        memory = self._memory_store.load() if self._memory_store else None
+        memory_config = self._config.definition.memory
+        system = build_system_prompt(
+            config=self._config,
+            memory=memory,
+            data_dir=self._config.agent_data_dir,
+            injection_prompt=memory_config.injection_prompt if memory_config else None,
+        )
+
         messages = self._store.replay(context_id)
-        tool_schemas = self._tools.list_schemas()
+        result = await run_completion(
+            llm=self._llm,
+            system=system,
+            messages=messages,
+            tools=self._tools,
+        )
 
-        while True:
-            response = await self._llm.complete(self._system, messages, tool_schemas)
+        self._journal_completion(context_id, result, via)
 
-            has_tool_use = any(
-                block.get("type") == "tool_use" for block in response.content
-            )
+        return LoopResult(context_id=context_id, content=result.content)
 
-            if has_tool_use:
-                self._store.append(
-                    context_id,
-                    MessageEntry(
-                        ctx=context_id,
-                        role="assistant",
-                        content=response.content,
-                        via=via,
-                    ),
-                )
-
-                tool_results = []
-                for block in response.content:
-                    if block.get("type") == "tool_use":
-                        result = await self._tools.execute(
-                            block["name"], block.get("input", {})
-                        )
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block["id"],
-                            "content": result.output,
-                            "is_error": result.is_error,
-                        })
-
-                self._store.append(
-                    context_id,
-                    MessageEntry(
-                        ctx=context_id,
-                        role="user",
-                        content=tool_results,
-                        via=via,
-                    ),
-                )
-
-                messages = self._store.replay(context_id)
-                continue
-
-            for block in response.content:
-                if block.get("type") == "compaction":
-                    self._store.append(
-                        context_id,
-                        CompactionEntry(
-                            ctx=context_id,
-                            content=block.get("content", ""),
-                        ),
-                    )
-                    logger.info("compaction marker stored for context %s", context_id)
-
+    def _journal_completion(
+        self,
+        context_id: str,
+        result: CompletionResult,
+        via: str,
+    ) -> None:
+        """Persist all turns from a completion cycle into the JSONL journal."""
+        for turn in result.turns:
             self._store.append(
                 context_id,
                 MessageEntry(
                     ctx=context_id,
                     role="assistant",
-                    content=response.content,
+                    content=turn.response.content,
                     via=via,
                 ),
             )
 
-            return LoopResult(context_id=context_id, content=response.content)
+            if turn.tool_results:
+                self._store.append(
+                    context_id,
+                    MessageEntry(
+                        ctx=context_id,
+                        role="user",
+                        content=turn.tool_results,
+                        via=via,
+                    ),
+                )
+
+        for block in result.content:
+            if block.get("type") == "compaction":
+                self._store.append(
+                    context_id,
+                    CompactionEntry(
+                        ctx=context_id,
+                        content=block.get("content", ""),
+                    ),
+                )
+                logger.info("compaction marker stored for context %s", context_id)

@@ -18,6 +18,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "list_directory",
         "search_files",
     ],
+    "memory": ["memory_edit"],
 }
 
 
@@ -106,6 +107,12 @@ class ToolRegistry:
                      to activate from the built-in registry.
         """
         from agentlings.tools.builtins import BUILTIN_REGISTRY
+        from agentlings.tools.memory import MEMORY_TOOL_DEFINITION
+
+        all_tools: dict[str, dict[str, Any]] = {
+            **BUILTIN_REGISTRY,
+            MEMORY_TOOL_DEFINITION["name"]: MEMORY_TOOL_DEFINITION,
+        }
 
         resolved: set[str] = set()
         for name in enabled:
@@ -115,8 +122,8 @@ class ToolRegistry:
                 resolved.add(name)
 
         for tool_name in sorted(resolved):
-            if tool_name in BUILTIN_REGISTRY:
-                defn = BUILTIN_REGISTRY[tool_name]
+            if tool_name in all_tools:
+                defn = all_tools[tool_name]
                 self.register(
                     name=defn["name"],
                     description=defn["description"],

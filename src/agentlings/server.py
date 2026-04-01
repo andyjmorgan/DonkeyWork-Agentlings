@@ -22,11 +22,16 @@ from starlette.routing import Route
 from agentlings.config import AgentConfig
 from agentlings.core.llm import create_llm_client
 from agentlings.core.loop import MessageLoop
+from agentlings.core.memory_store import MemoryFileStore
+from agentlings.core.scheduler import run_scheduler
+from agentlings.core.sleep import SleepCycle
 from agentlings.core.store import JournalStore
+from agentlings.core.telemetry import init_telemetry
 from agentlings.log import setup_logging
 from agentlings.protocol.a2a import AgentlingExecutor
 from agentlings.protocol.agent_card import generate_agent_card
 from agentlings.protocol.mcp import create_mcp_server
+from agentlings.tools.memory import init_memory_tool
 from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,18 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
 
     setup_logging(config.agent_log_level)
 
+    if config.telemetry_config:
+        init_telemetry(config.telemetry_config)
+
     store = JournalStore(config.agent_data_dir)
+
+    memory_store: MemoryFileStore | None = None
+    if "memory" in config.enabled_tools or (
+        config.definition.memory is not None
+    ):
+        memory_store = MemoryFileStore(config.agent_data_dir)
+        init_memory_tool(memory_store)
+
     tools = ToolRegistry()
     tools.register_tools(config.enabled_tools)
 
@@ -88,7 +104,10 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         tool_names=tools.tool_names(),
     )
 
-    loop = MessageLoop(config=config, store=store, llm=llm, tools=tools)
+    loop = MessageLoop(
+        config=config, store=store, llm=llm, tools=tools,
+        memory_store=memory_store,
+    )
     agent_card = generate_agent_card(config)
 
     executor = AgentlingExecutor(loop)
@@ -112,19 +131,41 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         )
         return Response()
 
+    sleep_cycle: SleepCycle | None = None
+    if config.sleep_config and memory_store:
+        sleep_cycle = SleepCycle(
+            config=config, llm=llm, memory_store=memory_store, store=store,
+        )
+
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         nonlocal transport
         transport = StreamableHTTPServerTransport(mcp_session_id=None)
 
+        background_tasks: list[asyncio.Task[None]] = []
+
         async with transport.connect() as (read_stream, write_stream):
-            task = asyncio.create_task(
+            mcp_task = asyncio.create_task(
                 mcp_server.run(
                     read_stream,
                     write_stream,
                     mcp_server.create_initialization_options(),
                 )
             )
+            background_tasks.append(mcp_task)
+
+            if sleep_cycle and config.sleep_config:
+                scheduler_task = asyncio.create_task(
+                    run_scheduler(
+                        expression=config.sleep_config.schedule,
+                        callback=sleep_cycle.run,
+                    )
+                )
+                background_tasks.append(scheduler_task)
+                logger.info(
+                    "sleep scheduler started: %s", config.sleep_config.schedule,
+                )
+
             logger.info(
                 "agentling '%s' started on %s:%s",
                 config.agent_name,
@@ -134,11 +175,12 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
             try:
                 yield
             finally:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                for t in background_tasks:
+                    t.cancel()
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
 
     routes = [
         Route("/mcp", mcp_endpoint, methods=["GET", "POST", "DELETE"]),
