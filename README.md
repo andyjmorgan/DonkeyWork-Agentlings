@@ -187,6 +187,7 @@ Secrets and runtime settings stay in env vars (or `.env` file):
 | `AGENT_OTEL_ENDPOINT` | — | OpenTelemetry collector endpoint |
 | `AGENT_OTEL_PROTOCOL` | `http` | Collector protocol (`http` or `grpc`) |
 | `AGENT_OTEL_INSECURE` | `true` | Disable TLS for collector connection |
+| `AGENT_OTEL_HEADERS` | — | Comma-separated `key=value` pairs for collector auth |
 
 ## Memory
 
@@ -314,7 +315,12 @@ telemetry:
   protocol: "http"                        # "http" or "grpc"
   service_name: "agentling"
   insecure: true
+  headers:                                # optional auth headers
+    Authorization: "Bearer your-token"
 ```
+
+Or via env vars: `AGENT_OTEL_ENDPOINT=http://collector:4318 AGENT_OTEL_HEADERS="Authorization=Bearer tok"`.
+
 
 When telemetry is disabled (the default) or the OpenTelemetry packages are not installed, all instrumentation is a no-op.
 

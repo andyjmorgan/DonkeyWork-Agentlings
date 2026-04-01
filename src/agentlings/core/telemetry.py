@@ -40,6 +40,8 @@ def init_telemetry(config: TelemetryConfig) -> None:
 
         resource = Resource.create({"service.name": config.service_name})
 
+        headers = config.headers or {}
+
         if config.protocol == "grpc":
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
                 OTLPMetricExporter as GrpcMetricExporter,
@@ -50,17 +52,21 @@ def init_telemetry(config: TelemetryConfig) -> None:
             span_exporter = GrpcSpanExporter(
                 endpoint=config.endpoint,
                 insecure=config.insecure,
+                headers=headers or None,
             )
             metric_exporter = GrpcMetricExporter(
                 endpoint=config.endpoint,
                 insecure=config.insecure,
+                headers=headers or None,
             )
         else:
             span_exporter = OTLPSpanExporter(
                 endpoint=f"{config.endpoint}/v1/traces",
+                headers=headers or None,
             )
             metric_exporter = OTLPMetricExporter(
                 endpoint=f"{config.endpoint}/v1/metrics",
+                headers=headers or None,
             )
 
         tracer_provider = TracerProvider(resource=resource)

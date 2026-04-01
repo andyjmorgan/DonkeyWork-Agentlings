@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
+
 import yaml
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -64,6 +65,7 @@ class TelemetryConfig(BaseModel):
     protocol: str = "http"
     service_name: str = "agentling"
     insecure: bool = True
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class SkillConfig(BaseModel):
@@ -131,6 +133,7 @@ class AgentConfig(BaseSettings):
     agent_otel_endpoint: str | None = None
     agent_otel_protocol: str = "http"
     agent_otel_insecure: bool = True
+    agent_otel_headers: str = ""
 
     _definition: AgentDefinition = AgentDefinition()
 
@@ -188,13 +191,30 @@ class AgentConfig(BaseSettings):
         if self.agent_otel_endpoint:
             if base is None:
                 base = TelemetryConfig(enabled=True)
-            base = base.model_copy(update={
+            updates: dict[str, Any] = {
                 "enabled": True,
                 "endpoint": self.agent_otel_endpoint,
                 "protocol": self.agent_otel_protocol,
                 "insecure": self.agent_otel_insecure,
-            })
+            }
+            if self.agent_otel_headers:
+                updates["headers"] = _parse_headers(self.agent_otel_headers)
+            base = base.model_copy(update=updates)
         return base
+
+
+def _parse_headers(raw: str) -> dict[str, str]:
+    """Parse a comma-separated ``key=value`` string into a headers dict.
+
+    Example: ``"Authorization=Bearer tok,X-Custom=val"``
+    """
+    headers: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            headers[k.strip()] = v.strip()
+    return headers
 
 
 def _load_definition(path: str) -> AgentDefinition:
