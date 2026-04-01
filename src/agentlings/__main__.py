@@ -33,13 +33,13 @@ def _list_tools() -> None:
             print(f"    {tool:20s} {desc}")
         print()
 
-    standalone = set(BUILTIN_REGISTRY.keys()) | {MEMORY_TOOL_DEFINITION["name"]}
+    standalone = set(all_tools.keys())
     for tools in TOOL_GROUPS.values():
         standalone -= set(tools)
     if standalone:
         print("Standalone tools:\n")
         for name in sorted(standalone):
-            desc = BUILTIN_REGISTRY.get(name, {}).get("description", "")
+            desc = all_tools.get(name, {}).get("description", "")
             print(f"  {name:22s} {desc}")
         print()
 

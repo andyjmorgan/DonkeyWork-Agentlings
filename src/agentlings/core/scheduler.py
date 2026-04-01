@@ -25,25 +25,37 @@ def parse_cron_field(field: str, min_val: int, max_val: int) -> set[int]:
     """
     values: set[int] = set()
 
+    def _validate(val: int, label: str) -> int:
+        if val < min_val or val > max_val:
+            raise ValueError(f"{label} {val} out of bounds [{min_val}, {max_val}] in '{field}'")
+        return val
+
     for part in field.split(","):
+        part = part.strip()
         if "/" in part:
             base, step_str = part.split("/", 1)
             step = int(step_str)
+            if step <= 0:
+                raise ValueError(f"Step must be positive in '{field}', got {step}")
             if base == "*":
                 start, end = min_val, max_val
             elif "-" in base:
                 lo, hi = base.split("-", 1)
-                start, end = int(lo), int(hi)
+                start = _validate(int(lo), "Range start")
+                end = _validate(int(hi), "Range end")
             else:
-                start, end = int(base), max_val
+                start = _validate(int(base), "Value")
+                end = max_val
             values.update(range(start, end + 1, step))
         elif part == "*":
             values.update(range(min_val, max_val + 1))
         elif "-" in part:
             lo, hi = part.split("-", 1)
-            values.update(range(int(lo), int(hi) + 1))
+            start = _validate(int(lo), "Range start")
+            end = _validate(int(hi), "Range end")
+            values.update(range(start, end + 1))
         else:
-            values.add(int(part))
+            values.add(_validate(int(part), "Value"))
 
     return values
 

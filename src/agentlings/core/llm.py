@@ -269,7 +269,7 @@ class AnthropicLLMClient(BaseLLMClient):
 
     async def batch_results(self, batch_id: str) -> list[BatchItemResult]:
         items: list[BatchItemResult] = []
-        async for entry in await self._client.messages.batches.results(batch_id):
+        async for entry in self._client.messages.batches.results(batch_id):
             if entry.result.type == "succeeded":
                 content = [block.model_dump() for block in entry.result.message.content]
                 items.append(BatchItemResult(

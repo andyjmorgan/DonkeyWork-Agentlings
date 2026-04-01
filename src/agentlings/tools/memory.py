@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from agentlings.core.memory_store import MemoryFileStore
+from agentlings.core.telemetry import sleep_span
 from agentlings.tools.registry import ToolResult
 
 _MEMORY_STORE: MemoryFileStore | None = None
@@ -36,11 +37,13 @@ def _memory_edit(operation: str, key: str | None = None, value: str | None = Non
         return ToolResult(output="Memory not initialized", is_error=True)
 
     if operation == "list":
-        entries = _MEMORY_STORE.list()
-        if not entries:
-            return ToolResult(output="Memory is empty.")
-        lines = [f"- **{e.key}**: {e.value}" for e in entries]
-        return ToolResult(output="\n".join(lines))
+        with sleep_span("agentling.memory.list") as span:
+            entries = _MEMORY_STORE.list()
+            span.set_attribute("total_entries", len(entries))
+            if not entries:
+                return ToolResult(output="Memory is empty.")
+            lines = [f"- **{e.key}**: {e.value}" for e in entries]
+            return ToolResult(output="\n".join(lines))
 
     if operation == "set":
         if not key or not value:
@@ -48,8 +51,10 @@ def _memory_edit(operation: str, key: str | None = None, value: str | None = Non
                 output="Both 'key' and 'value' are required for set operation",
                 is_error=True,
             )
-        store = _MEMORY_STORE.set(key, value)
-        return ToolResult(output=f"Memory updated: {key} ({len(store.entries)} entries total)")
+        with sleep_span("agentling.memory.set", {"key": key}) as span:
+            store = _MEMORY_STORE.set(key, value)
+            span.set_attribute("total_entries", len(store.entries))
+            return ToolResult(output=f"Memory updated: {key} ({len(store.entries)} entries total)")
 
     if operation == "remove":
         if not key:
@@ -57,8 +62,10 @@ def _memory_edit(operation: str, key: str | None = None, value: str | None = Non
                 output="'key' is required for remove operation",
                 is_error=True,
             )
-        store = _MEMORY_STORE.remove(key)
-        return ToolResult(output=f"Memory entry '{key}' removed ({len(store.entries)} entries total)")
+        with sleep_span("agentling.memory.remove", {"key": key}) as span:
+            store = _MEMORY_STORE.remove(key)
+            span.set_attribute("total_entries", len(store.entries))
+            return ToolResult(output=f"Memory entry '{key}' removed ({len(store.entries)} entries total)")
 
     return ToolResult(
         output=f"Unknown operation: {operation}. Use 'set', 'remove', or 'list'.",

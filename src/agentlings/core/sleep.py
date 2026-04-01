@@ -19,6 +19,7 @@ from agentlings.core.memory_models import (
     MemoryCandidate,
     strict_json_schema,
 )
+from agentlings.core.telemetry import sleep_span
 from agentlings.core.memory_store import MemoryFileStore
 from agentlings.core.prompt import build_system_prompt
 from agentlings.core.store import JournalStore
@@ -81,19 +82,26 @@ class SleepCycle:
         start = time.monotonic()
         logger.info("[SLEEP] Starting cycle for %s", date_str)
 
-        conversations = self._light_sleep(date)
-        if not conversations:
-            logger.info("[SLEEP:LIGHT] No conversations found, skipping cycle")
-            return
+        with sleep_span("agentling.sleep", {"agent.name": self._config.agent_name, "sleep.date": date_str}) as root:
+            with sleep_span("agentling.sleep.light_sleep", {"sleep.phase": "light_sleep", "sleep.date": date_str}) as ls:
+                conversations = self._light_sleep(date)
+                ls.set_attribute("sleep.conversations_found", len(conversations))
+                if not conversations:
+                    ls.set_attribute("sleep.skipped", True)
+                    logger.info("[SLEEP:LIGHT] No conversations found, skipping cycle")
+                    return
 
-        logger.info("[SLEEP:LIGHT] Found %d conversations, proceeding", len(conversations))
+            logger.info("[SLEEP:LIGHT] Found %d conversations, proceeding", len(conversations))
 
-        summaries, candidates = await self._deep_sleep(conversations, date_str)
+            with sleep_span("agentling.sleep.deep_sleep", {"sleep.phase": "deep_sleep", "sleep.date": date_str}):
+                summaries, candidates = await self._deep_sleep(conversations, date_str)
 
-        if summaries:
-            await self._rem(summaries, candidates, date_str)
+            if summaries:
+                with sleep_span("agentling.sleep.rem", {"sleep.phase": "rem", "sleep.date": date_str}):
+                    await self._rem(summaries, candidates, date_str)
 
-        self._housekeeping(date)
+            with sleep_span("agentling.sleep.housekeeping", {"sleep.phase": "housekeeping", "sleep.date": date_str}):
+                self._housekeeping(date)
 
         elapsed = time.monotonic() - start
         logger.info("[SLEEP] Cycle complete in %.1fs", elapsed)

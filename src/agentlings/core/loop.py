@@ -100,6 +100,7 @@ class MessageLoop:
             memory=memory,
             data_dir=self._config.agent_data_dir,
             injection_prompt=memory_config.injection_prompt if memory_config else None,
+            token_budget=memory_config.token_budget if memory_config else 2000,
         )
 
         messages = self._store.replay(context_id)

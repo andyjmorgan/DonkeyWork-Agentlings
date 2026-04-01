@@ -39,6 +39,7 @@ def build_system_prompt(
     memory: MemoryStore | None = None,
     data_dir: Path | None = None,
     injection_prompt: str | None = None,
+    token_budget: int = 2000,
 ) -> list[dict[str, Any]]:
     """Build the system prompt blocks for the Anthropic Messages API.
 
@@ -67,24 +68,47 @@ def build_system_prompt(
 
     if memory and memory.entries:
         template = injection_prompt or DEFAULT_MEMORY_INJECTION
-        entries_text = "\n".join(
-            f"- **{e.key}**: {e.value}" for e in memory.entries
-        )
-        memory_block = template.format(entries=entries_text)
-        blocks.append({
-            "type": "text",
-            "text": memory_block,
-            "cache_control": {"type": "ephemeral"},
-        })
+        memory_block = _build_memory_block(template, memory.entries, token_budget)
+        if memory_block:
+            blocks.append({
+                "type": "text",
+                "text": memory_block,
+                "cache_control": {"type": "ephemeral"},
+            })
 
     if data_dir is not None:
         awareness = DEFAULT_DATA_DIR_AWARENESS.format(data_dir=data_dir)
         blocks.append({
             "type": "text",
             "text": awareness,
+            "cache_control": {"type": "ephemeral"},
         })
 
     return blocks
+
+
+CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens(text: str) -> int:
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _build_memory_block(
+    template: str,
+    entries: list,
+    token_budget: int,
+) -> str | None:
+    """Build the memory injection block, truncating entries to fit the token budget."""
+    included = list(entries)
+    while included:
+        entries_text = "\n".join(f"- **{e.key}**: {e.value}" for e in included)
+        block = template.format(entries=entries_text)
+        if _estimate_tokens(block) <= token_budget:
+            return block
+        included.pop()
+        logger.debug("memory block over budget, dropped to %d entries", len(included))
+    return None
 
 
 def _default_prompt(config: AgentConfig) -> str:

@@ -52,7 +52,7 @@ class MemoryFileStore:
         os.close(fd)
         try:
             Path(tmp_path).write_text(content, encoding="utf-8")
-            Path(tmp_path).rename(self._path)
+            os.replace(tmp_path, self._path)
         except BaseException:
             Path(tmp_path).unlink(missing_ok=True)
             raise
