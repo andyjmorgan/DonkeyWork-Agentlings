@@ -183,8 +183,18 @@ class AgentConfig(BaseSettings):
 
     @property
     def telemetry_config(self) -> TelemetryConfig | None:
-        """Telemetry configuration from the YAML definition."""
-        return self._definition.telemetry
+        """Telemetry configuration, with env vars overriding YAML values."""
+        base = self._definition.telemetry
+        if self.agent_otel_endpoint:
+            if base is None:
+                base = TelemetryConfig(enabled=True)
+            base = base.model_copy(update={
+                "enabled": True,
+                "endpoint": self.agent_otel_endpoint,
+                "protocol": self.agent_otel_protocol,
+                "insecure": self.agent_otel_insecure,
+            })
+        return base
 
 
 def _load_definition(path: str) -> AgentDefinition:
