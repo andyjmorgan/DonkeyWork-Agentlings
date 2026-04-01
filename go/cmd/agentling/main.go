@@ -1,3 +1,4 @@
+// Package main is the entry point for the agentling server.
 package main
 
 import (

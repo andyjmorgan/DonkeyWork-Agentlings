@@ -1,3 +1,4 @@
+// Package config loads and validates agentling runtime configuration from environment variables and YAML definitions.
 package config
 
 import (
@@ -11,6 +12,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SkillConfig defines a skill that the agent can advertise and execute.
+// ID is a unique machine-readable identifier for the skill, Name is its
+// human-readable display name, and Description explains what the skill does.
+// Tags provide optional classification labels used for discovery and filtering.
 type SkillConfig struct {
 	ID          string   `yaml:"id"`
 	Name        string   `yaml:"name"`
@@ -18,6 +23,12 @@ type SkillConfig struct {
 	Tags        []string `yaml:"tags"`
 }
 
+// AgentDefinition holds the agent's identity, capabilities, and system prompt
+// as declared in a YAML config file. Name and Description populate the Agent
+// Card and MCP tool metadata. Tools lists the tool group names the agent is
+// allowed to use at runtime. Skills enumerates the discrete capabilities the
+// agent advertises to callers. SystemPrompt, when non-empty, overrides the
+// default system prompt sent to the LLM.
 type AgentDefinition struct {
 	Name         string        `yaml:"name"`
 	Description  string        `yaml:"description"`
@@ -26,6 +37,19 @@ type AgentDefinition struct {
 	SystemPrompt string        `yaml:"system_prompt"`
 }
 
+// Config aggregates all runtime configuration sourced from environment
+// variables and the optional YAML agent definition. AnthropicAPIKey and
+// AgentAPIKey hold the Anthropic API credential and the inbound request
+// authentication key respectively. AgentModel and AgentMaxTokens control the
+// LLM model identifier and response token ceiling. AgentHost and AgentPort
+// set the HTTP listen address (defaults 0.0.0.0:8420). AgentDataDir is the
+// directory used for JSONL journal storage and is created automatically if it
+// does not exist. AgentLogLevel sets the slog level string (e.g. "INFO",
+// "DEBUG"). AgentLLMBackend selects the LLM backend — "anthropic" for the
+// real API or "mock" for testing. AgentExternalURL, when set, is the
+// publicly-reachable base URL advertised in the Agent Card. AgentConfig
+// points to an optional YAML file whose contents are unmarshalled into
+// Definition, overriding the default agent identity.
 type Config struct {
 	AnthropicAPIKey string
 	AgentAPIKey     string
@@ -42,6 +66,11 @@ type Config struct {
 	Definition AgentDefinition
 }
 
+// Load reads configuration from environment variables (and an optional .env
+// file in the working directory), applies sensible defaults, creates the data
+// directory if needed, and optionally overlays a YAML agent definition when
+// AGENT_CONFIG is set. It returns the fully populated Config or an error if
+// the data directory cannot be created or the YAML file cannot be read/parsed.
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
@@ -78,6 +107,12 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// LoadFromEnv injects the given key-value pairs into the process environment
+// and then delegates to Load. The env map keys are environment variable names
+// (e.g. "AGENT_PORT") and the values are their desired settings. This is
+// primarily useful in tests where the caller needs deterministic configuration
+// without touching .env files. It returns the same Config and error semantics
+// as Load.
 func LoadFromEnv(env map[string]string) (*Config, error) {
 	for k, v := range env {
 		os.Setenv(k, v)

@@ -8,15 +8,31 @@ import (
 	"github.com/google/uuid"
 )
 
+// MockLLMClient implements LLMClient with deterministic responses for testing.
+// It produces canned replies and simulates tool_use responses when message text
+// mentions a registered tool name. CallCount tracks the total number of
+// Complete invocations, which is useful for asserting call sequences in tests.
 type MockLLMClient struct {
 	toolNames []string
 	CallCount int
 }
 
+// NewMockLLMClient creates a mock LLM client. The toolNames slice determines
+// which tool names the mock will recognize; when the last user message contains
+// one of these names, Complete returns a tool_use content block for that tool
+// instead of a plain text reply.
 func NewMockLLMClient(toolNames []string) *MockLLMClient {
 	return &MockLLMClient{toolNames: toolNames}
 }
 
+// Complete returns a deterministic response derived from the last entry in
+// messages. The ctx, system, and tools parameters are accepted for interface
+// compatibility but ignored. If messages is empty, a generic placeholder
+// response is returned. If the last message contains a tool_result block, the
+// response acknowledges the tool output. Otherwise, if the message text matches
+// a registered tool name, a tool_use block with synthetic input is returned
+// (stop reason "tool_use"); in all other cases a plain text echo is returned
+// (stop reason "end_turn"). The method never returns an error.
 func (m *MockLLMClient) Complete(_ context.Context, system, messages, tools []map[string]any) (*LLMResponse, error) {
 	m.CallCount++
 

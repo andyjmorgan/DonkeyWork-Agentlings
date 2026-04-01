@@ -9,12 +9,20 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
+// AnthropicLLMClient implements LLMClient using the Anthropic Messages API.
+// It holds a configured SDK client, model identifier, and token limit that are
+// reused across calls.
 type AnthropicLLMClient struct {
 	client    anthropic.Client
 	model     string
 	maxTokens int
 }
 
+// NewAnthropicLLMClient creates an Anthropic-backed LLM client. The apiKey is
+// used to authenticate with the Anthropic API, model selects which Claude model
+// to target (e.g. "claude-sonnet-4-6"), and maxTokens sets the upper bound
+// on tokens in each completion response. The returned error is currently always
+// nil but is reserved for future validation.
 func NewAnthropicLLMClient(apiKey, model string, maxTokens int) (*AnthropicLLMClient, error) {
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 	return &AnthropicLLMClient{
@@ -24,6 +32,13 @@ func NewAnthropicLLMClient(apiKey, model string, maxTokens int) (*AnthropicLLMCl
 	}, nil
 }
 
+// Complete sends the conversation to the Anthropic Messages API and returns the
+// parsed response. The system slice provides system-prompt text blocks
+// (supporting optional cache_control directives), messages carries the full
+// conversation history, and tools describes available tool schemas. If tools is
+// empty, the request is sent without tool definitions. The response content
+// blocks are round-tripped through JSON to produce generic maps. Returns an
+// error if system/message/tool conversion fails or the API call itself errors.
 func (a *AnthropicLLMClient) Complete(ctx context.Context, system, messages, tools []map[string]any) (*LLMResponse, error) {
 	systemBlocks, err := toSystemBlocks(system)
 	if err != nil {

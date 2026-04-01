@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// Setup configures the default slog logger to write text-formatted output to
+// stderr at the specified severity. The level string is case-insensitive and
+// accepts "DEBUG", "INFO", "WARN" (or "WARNING"), and "ERROR"; any unrecognised
+// value falls back to INFO.
 func Setup(level string) {
 	var lvl slog.Level
 	switch strings.ToUpper(level) {

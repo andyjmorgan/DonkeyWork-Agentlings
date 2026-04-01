@@ -13,6 +13,10 @@ import (
 
 const defaultTimeout = 30
 
+// BuiltinDef defines a built-in tool's metadata and execution function. Name
+// and Description appear in the Anthropic tool schema sent to the LLM,
+// InputSchema is the JSON Schema object describing accepted parameters, and
+// ExecuteFn is the callback invoked at runtime with the parsed input.
 type BuiltinDef struct {
 	Name        string
 	Description string
@@ -216,6 +220,7 @@ func searchFilesTool(_ context.Context, input map[string]any) ToolResult {
 	return ToolResult{Output: strings.Join(matches, "\n")}
 }
 
+// BuiltinRegistry maps tool names to their definitions for all built-in tools.
 var BuiltinRegistry = map[string]BuiltinDef{
 	"bash": {
 		Name:        "bash",

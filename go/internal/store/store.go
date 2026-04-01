@@ -13,12 +13,19 @@ import (
 	"github.com/andyjmorgan/agentlings-go/internal/models"
 )
 
+// ErrContextNotFound is returned when a journal file does not exist for the given context ID.
 var ErrContextNotFound = errors.New("context not found")
 
+// JournalStore manages append-only JSONL journals keyed by context ID.
+// Each context ID maps to a single .jsonl file under the configured data
+// directory. Writes are serialised with flock to allow concurrent appenders.
 type JournalStore struct {
 	dataDir string
 }
 
+// NewJournalStore returns a JournalStore that persists journals under dataDir,
+// creating the directory (and any missing parents) if it does not already exist.
+// The returned store is ready for use immediately.
 func NewJournalStore(dataDir string) *JournalStore {
 	os.MkdirAll(dataDir, 0o755)
 	return &JournalStore{dataDir: dataDir}
@@ -28,6 +35,10 @@ func (s *JournalStore) path(ctxID string) string {
 	return filepath.Join(s.dataDir, ctxID+".jsonl")
 }
 
+// Create initialises an empty journal file for ctxID. The context ID is used
+// verbatim as the filename stem (with a .jsonl extension), so callers should
+// ensure it is filesystem-safe. Returns a non-nil error if the file cannot be
+// created.
 func (s *JournalStore) Create(ctxID string) error {
 	p := s.path(ctxID)
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644)
@@ -39,11 +50,19 @@ func (s *JournalStore) Create(ctxID string) error {
 	return nil
 }
 
+// Exists reports whether a journal file already exists on disk for ctxID.
+// It returns false for any stat error, including permission failures.
 func (s *JournalStore) Exists(ctxID string) bool {
 	_, err := os.Stat(s.path(ctxID))
 	return err == nil
 }
 
+// Append serialises entry as a single JSON line and appends it to the journal
+// for ctxID. The entry should be a MessageEntry or CompactionEntry, but any
+// JSON-marshalable value is accepted. The write is protected by an exclusive
+// flock and followed by an fsync, so concurrent appenders are safe and data is
+// durable on return. If the journal file for ctxID does not exist, Append
+// returns an error wrapping ErrContextNotFound.
 func (s *JournalStore) Append(ctxID string, entry any) error {
 	p := s.path(ctxID)
 	if _, err := os.Stat(p); err != nil {
@@ -85,6 +104,13 @@ func (s *JournalStore) Append(ctxID string, entry any) error {
 	return nil
 }
 
+// Replay reads the full journal for ctxID and returns the reconstructed message
+// history starting from the most recent compaction marker. If no compaction
+// marker exists, the entire journal is replayed from the beginning. Each
+// returned map contains "role" and "content" keys suitable for passing to the
+// LLM messages API. An empty journal yields a nil slice with no error. If the
+// journal file for ctxID does not exist, Replay returns an error wrapping
+// ErrContextNotFound. Individual lines up to 10 MB are supported.
 func (s *JournalStore) Replay(ctxID string) ([]map[string]any, error) {
 	p := s.path(ctxID)
 	if _, err := os.Stat(p); err != nil {

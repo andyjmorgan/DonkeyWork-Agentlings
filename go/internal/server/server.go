@@ -18,6 +18,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// New builds the HTTP handler serving A2A (/a2a), MCP (/mcp), and Agent Card
+// (/.well-known/agent.json) endpoints. The cfg supplies all runtime
+// configuration including API keys, model settings, tool definitions, and agent
+// identity. It returns a fully wired http.Handler with API key middleware
+// applied to all paths except the public Agent Card endpoints, or an error if
+// the LLM client or agent card cannot be initialised.
 func New(cfg *config.Config) (http.Handler, error) {
 	applog.Setup(cfg.AgentLogLevel)
 
@@ -78,6 +84,10 @@ func New(cfg *config.Config) (http.Handler, error) {
 	return handler, nil
 }
 
+// Run starts the agentling HTTP server and blocks until it returns an error or
+// is shut down. The cfg provides all runtime configuration; the server listens
+// on cfg.AgentHost:cfg.AgentPort. It returns the error from
+// http.ListenAndServe, or an error from New if handler construction fails.
 func Run(cfg *config.Config) error {
 	handler, err := New(cfg)
 	if err != nil {

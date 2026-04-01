@@ -7,6 +7,15 @@ import (
 	"github.com/andyjmorgan/agentlings-go/internal/config"
 )
 
+// GenerateAgentCard builds an A2A Agent Card from the application configuration.
+// The cfg supplies the agent's identity (name, description), network binding
+// (host, port), and optional skills list. When cfg.AgentExternalURL is set it
+// is used as the card's endpoint base; otherwise the endpoint is derived from
+// cfg.AgentHost and cfg.AgentPort. If cfg.Definition.Skills is non-empty each
+// skill is mapped directly to an AgentSkill; otherwise a single default skill
+// is synthesised from the agent's name and description. The returned card
+// advertises text/plain I/O, no streaming, no push notifications, and requires
+// an X-API-Key header for authentication.
 func GenerateAgentCard(cfg *config.Config) *a2a.AgentCard {
 	var url string
 	if cfg.AgentExternalURL != "" {

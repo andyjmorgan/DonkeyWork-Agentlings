@@ -6,6 +6,12 @@ import (
 	"github.com/andyjmorgan/agentlings-go/internal/config"
 )
 
+// BuildSystemPrompt returns the system prompt as a slice of Anthropic content
+// blocks suitable for passing directly to the Messages API. The cfg provides the
+// agent definition: if cfg.Definition.SystemPrompt is non-empty it is used
+// verbatim; otherwise a default prompt is generated from the agent's Name and
+// Description. The returned block includes an ephemeral cache_control directive
+// so the prompt benefits from prompt caching across turns.
 func BuildSystemPrompt(cfg *config.Config) []map[string]any {
 	var text string
 	if cfg.Definition.SystemPrompt != "" {

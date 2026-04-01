@@ -14,11 +14,19 @@ import (
 	"github.com/google/uuid"
 )
 
+// LoopResult holds the final assistant response and the context ID for a completed
+// message loop turn. ContextID is the conversation handle (server-generated or
+// externally supplied) that can be reused for follow-up turns. Content contains
+// the LLM's terminal response as raw Anthropic content blocks.
 type LoopResult struct {
 	ContextID string
 	Content   []map[string]any
 }
 
+// MessageLoop orchestrates the agent turn loop: journal replay, LLM calls, and
+// tool execution. It holds references to the journal store for conversation
+// persistence, an LLM client for completions, a tool registry for executing
+// tool calls, and the pre-built system prompt content blocks.
 type MessageLoop struct {
 	config *config.Config
 	store  *store.JournalStore
@@ -27,6 +35,13 @@ type MessageLoop struct {
 	system []map[string]any
 }
 
+// New creates a MessageLoop wired to the given configuration, journal store,
+// LLM client, and tool registry. The cfg provides agent identity used to build
+// the system prompt at construction time. The store s handles JSONL journal
+// persistence, l provides LLM completions, and t supplies the available tool
+// schemas and execution logic. The returned MessageLoop is safe to use
+// concurrently from multiple goroutines since it delegates state to the
+// underlying store.
 func New(cfg *config.Config, s *store.JournalStore, l llm.LLMClient, t *tools.ToolRegistry) *MessageLoop {
 	return &MessageLoop{
 		config: cfg,
@@ -37,6 +52,14 @@ func New(cfg *config.Config, s *store.JournalStore, l llm.LLMClient, t *tools.To
 	}
 }
 
+// ProcessMessage runs a full agent turn for the given user message. The ctx
+// controls cancellation and timeouts for LLM calls. The text parameter is the
+// user's input message. If contextID is empty, a new UUID-based context is
+// created and its journal initialised; if non-empty but not yet known to the
+// store, the journal is created using the caller-supplied ID. The via string
+// records the originating protocol (e.g. "a2a" or "mcp") in journal entries.
+// It returns a LoopResult containing the final assistant content blocks and the
+// context ID, or an error if any journal or LLM operation fails.
 func (ml *MessageLoop) ProcessMessage(ctx context.Context, text, contextID, via string) (*LoopResult, error) {
 	if contextID == "" {
 		contextID = uuid.New().String()
