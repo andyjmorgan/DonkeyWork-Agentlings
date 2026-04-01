@@ -156,6 +156,7 @@ Point to it with `AGENT_CONFIG=./agent.yaml`.
 |-------|-------|-------------|
 | `bash` | `bash` | Shell command execution with timeout |
 | `filesystem` | `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files` | File operations with offset/limit, find-and-replace, glob search |
+| `memory` | `memory_edit` | Read and write the agent's persistent long-term memory |
 
 Tools are off by default. Run `agentling --list-tools` for details.
 
@@ -183,6 +184,139 @@ Secrets and runtime settings stay in env vars (or `.env` file):
 | `AGENT_LOG_LEVEL` | `INFO` | Log level |
 | `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` or `mock` |
 | `AGENT_EXTERNAL_URL` | — | Public URL for Agent Card (needed in Docker/k8s) |
+| `AGENT_OTEL_ENDPOINT` | — | OpenTelemetry collector endpoint |
+| `AGENT_OTEL_PROTOCOL` | `http` | Collector protocol (`http` or `grpc`) |
+| `AGENT_OTEL_INSECURE` | `true` | Disable TLS for collector connection |
+
+## Memory
+
+Agentlings can maintain persistent long-term memory — a curated set of key-value facts that survive across conversations. Memory transforms an agent from a tool that forgets into one that learns.
+
+### How it works
+
+Memory is a JSON file (`data/memory/memory.json`) containing entries like:
+
+```json
+{
+  "entries": [
+    {
+      "key": "cluster-node-count",
+      "value": "4 nodes: node1 (control), node2-4 (workers)",
+      "recorded": "2026-04-01T10:00:00Z"
+    }
+  ]
+}
+```
+
+The memory block is injected into the system prompt on every LLM call, between the agent's identity and the conversation history. The agent sees its accumulated knowledge as working context, not as a separate tool call.
+
+### The memory tool
+
+When the `memory` tool group is enabled, the agent gets a `memory_edit` tool with three operations:
+
+| Operation | Description |
+|-----------|-------------|
+| `set` | Upsert an entry by key. Updates the timestamp. |
+| `remove` | Delete an entry by key. |
+| `list` | Return all current entries. |
+
+The agent decides what to remember based on its system prompt. A DevOps agent might store cluster topology and known issues. A support agent might store escalation paths and recurring problems.
+
+### CLI
+
+```bash
+# Show current memory
+agentling memory show
+```
+
+### Configuration
+
+```yaml
+memory:
+  token_budget: 2000        # max tokens for the memory block in the system prompt
+  # injection_prompt: null   # override the memory/data-dir-awareness template
+```
+
+## Sleep cycle
+
+The sleep cycle is a nightly process that journals the day's activity, consolidates new knowledge into memory, prunes stale entries, and cleans up old files. It maps to biological sleep phases.
+
+```mermaid
+graph LR
+    L[Light Sleep<br/>Gate check] --> D[Deep Sleep<br/>Replay & journal]
+    D --> R[REM<br/>Integrate & prune]
+    R --> H[Housekeeping<br/>Retention cleanup]
+```
+
+### Phase 1: Light sleep — gate check
+
+Quick check: were there any conversations today? If not, skip everything. No LLM calls, no cost.
+
+### Phase 2: Deep sleep — replay and file
+
+For each conversation from today, the sleep cycle reads the JSONL journal from the last compaction marker and submits all summaries as a single **batch request** to the Anthropic Message Batches API. Batch processing runs at 50% cost and processes in parallel.
+
+Each summary call receives the agent's system prompt (so the agent's persona shapes what it considers important), current memory, and the conversation content. The LLM returns a structured `ConversationSummary` with a narrative and memory candidates.
+
+Results are written to `data/journals/YYYY-MM-DD.md`.
+
+### Phase 3: REM — integrate and prune
+
+A single LLM call receives current memory, today's journal, and all extracted memory candidates. It integrates new facts, deduplicates, reviews existing entries for staleness, and returns a `ConsolidatedMemory` — the complete updated memory store. Written atomically to `memory.json`.
+
+### Phase 4: Housekeeping — retention cleanup
+
+Deletes conversation JSONL files older than `conversation_retention_days` and journal files older than `journal_retention_days`.
+
+### Configuration
+
+```yaml
+sleep:
+  schedule: "0 2 * * *"           # cron expression (default: 2am daily)
+  journal_retention_days: 30       # keep journals for 30 days
+  conversation_retention_days: 14  # keep JSONL conversations for 14 days
+  memory_max_entries: 50           # hard cap after consolidation
+  # model: null                    # override model for sleep calls
+  # summary_prompt: null           # override per-conversation summary prompt
+  # consolidation_prompt: null     # override REM consolidation prompt
+```
+
+### CLI
+
+```bash
+# Trigger sleep cycle manually
+agentling sleep --date 2026-04-01
+```
+
+### Data directory layout
+
+```
+data/
+  abc123.jsonl           # conversation journals (flat, as before)
+  def456.jsonl
+  memory/
+    memory.json          # persistent memory store
+  journals/
+    2026-04-01.md        # daily sleep journal
+    2026-04-02.md
+```
+
+The agent is told about this directory structure and can use its filesystem tools to search past journals and conversation logs for context beyond what fits in memory.
+
+## OpenTelemetry
+
+The sleep cycle and memory tool emit spans and metrics to an OpenTelemetry collector when telemetry is enabled.
+
+```yaml
+telemetry:
+  enabled: true
+  endpoint: "http://otel-collector:4318"
+  protocol: "http"                        # "http" or "grpc"
+  service_name: "agentling"
+  insecure: true
+```
+
+When telemetry is disabled (the default) or the OpenTelemetry packages are not installed, all instrumentation is a no-op.
 
 ## Architecture
 
