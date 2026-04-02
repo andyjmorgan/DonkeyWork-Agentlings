@@ -94,10 +94,17 @@ class ToolRegistry:
             return ToolResult(output=f"Unknown tool: {name}", is_error=True)
 
         logger.debug("executing tool: %s", name)
-        fn = entry.execute_fn
-        if asyncio.iscoroutinefunction(fn):
-            return await fn(**input_dict)
-        return await asyncio.to_thread(fn, **input_dict)
+        try:
+            fn = entry.execute_fn
+            if asyncio.iscoroutinefunction(fn):
+                return await fn(**input_dict)
+            return await asyncio.to_thread(fn, **input_dict)
+        except Exception:
+            logger.exception("tool %s raised an unhandled exception", name)
+            return ToolResult(
+                output=f"Tool {name} failed with an internal error",
+                is_error=True,
+            )
 
     def register_tools(self, enabled: list[str], bash_timeout: int = 30) -> None:
         """Register built-in tools by name or group.

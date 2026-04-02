@@ -69,6 +69,16 @@ class TestExecute:
         result = await registry.execute("fail", {})
         assert result.is_error is True
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_exception_caught(self, registry: ToolRegistry) -> None:
+        def explode() -> ToolResult:
+            raise RuntimeError("kaboom")
+
+        registry.register("explode", "Explodes", {}, explode)
+        result = await registry.execute("explode", {})
+        assert result.is_error is True
+        assert "internal error" in result.output
+
 
 class TestRegisterTools:
     def test_no_tools_when_empty(self, registry: ToolRegistry) -> None:
