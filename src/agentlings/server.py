@@ -88,7 +88,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         init_memory_tool(memory_store)
 
     tools = ToolRegistry()
-    tools.register_tools(config.enabled_tools)
+    tools.register_tools(config.enabled_tools, bash_timeout=config.definition.bash_timeout)
 
     if not tools.tool_names():
         logger.warning(

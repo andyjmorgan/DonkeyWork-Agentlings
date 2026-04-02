@@ -14,6 +14,7 @@ from agentlings.core.memory_store import MemoryFileStore
 from agentlings.core.models import CompactionEntry, MessageEntry
 from agentlings.core.prompt import build_system_prompt
 from agentlings.core.store import JournalStore
+from agentlings.core.telemetry import otel_span
 from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -78,40 +79,50 @@ class MessageLoop:
         if context_id is None:
             context_id = str(uuid4())
             self._store.create(context_id)
-            logger.info("new context: %s", context_id)
+            logger.info("new context: %s via=%s", context_id, via)
         elif not self._store.exists(context_id):
             self._store.create(context_id)
-            logger.info("new context (external id): %s", context_id)
+            logger.info("new context (external id): %s via=%s", context_id, via)
+        else:
+            logger.info("continuing context: %s via=%s", context_id, via)
 
-        self._store.append(
-            context_id,
-            MessageEntry(
-                ctx=context_id,
-                role="user",
-                content=[{"type": "text", "text": text}],
-                via=via,
-            ),
-        )
+        with otel_span("agentling.loop.process_message", {
+            "agent.name": self._config.agent_name,
+            "loop.context_id": context_id,
+            "loop.via": via,
+        }) as span:
+            self._store.append(
+                context_id,
+                MessageEntry(
+                    ctx=context_id,
+                    role="user",
+                    content=[{"type": "text", "text": text}],
+                    via=via,
+                ),
+            )
 
-        memory = self._memory_store.load() if self._memory_store else None
-        memory_config = self._config.definition.memory
-        system = build_system_prompt(
-            config=self._config,
-            memory=memory,
-            data_dir=self._config.agent_data_dir,
-            injection_prompt=memory_config.injection_prompt if memory_config else None,
-            token_budget=memory_config.token_budget if memory_config else 2000,
-        )
+            memory = self._memory_store.load() if self._memory_store else None
+            memory_config = self._config.definition.memory
+            system = build_system_prompt(
+                config=self._config,
+                memory=memory,
+                data_dir=self._config.agent_data_dir,
+                injection_prompt=memory_config.injection_prompt if memory_config else None,
+                token_budget=memory_config.token_budget if memory_config else 2000,
+            )
 
-        messages = self._store.replay(context_id)
-        result = await run_completion(
-            llm=self._llm,
-            system=system,
-            messages=messages,
-            tools=self._tools,
-        )
+            messages = self._store.replay(context_id)
+            result = await run_completion(
+                llm=self._llm,
+                system=system,
+                messages=messages,
+                tools=self._tools,
+            )
 
-        self._journal_completion(context_id, result, via)
+            self._journal_completion(context_id, result, via)
+
+            span.set_attribute("loop.turns", len(result.turns))
+            span.set_attribute("loop.stop_reason", result.stop_reason or "unknown")
 
         return LoopResult(context_id=context_id, content=result.content)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agentlings.tools.builtins import build_builtin_registry
 from agentlings.tools.registry import ToolRegistry, ToolResult
 
 
@@ -68,6 +69,16 @@ class TestExecute:
         result = await registry.execute("fail", {})
         assert result.is_error is True
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_exception_caught(self, registry: ToolRegistry) -> None:
+        def explode() -> ToolResult:
+            raise RuntimeError("kaboom")
+
+        registry.register("explode", "Explodes", {}, explode)
+        result = await registry.execute("explode", {})
+        assert result.is_error is True
+        assert "internal error" in result.output
+
 
 class TestRegisterTools:
     def test_no_tools_when_empty(self, registry: ToolRegistry) -> None:
@@ -97,9 +108,9 @@ class TestRegisterTools:
         assert "bash" in names
         assert "read_file" in names
 
-    def test_unknown_tool_ignored(self, registry: ToolRegistry) -> None:
-        registry.register_tools(["nonexistent"])
-        assert registry.tool_names() == []
+    def test_unknown_tool_raises(self, registry: ToolRegistry) -> None:
+        with pytest.raises(ValueError, match="Unknown tools"):
+            registry.register_tools(["nonexistent"])
 
 
 class TestBashTool:
@@ -238,3 +249,51 @@ class TestFilesystemTools:
         assert "a.py" in result.output
         assert "c.py" in result.output
         assert "b.txt" not in result.output
+
+
+class TestBashTimeout:
+    def test_custom_timeout_via_register_tools(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"], bash_timeout=120)
+        assert "bash" in registry.tool_names()
+
+    @pytest.mark.asyncio
+    async def test_custom_timeout_applies(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"], bash_timeout=1)
+        result = await registry.execute("bash", {"command": "sleep 5"})
+        assert result.is_error is True
+        assert "timed out after 1s" in result.output
+
+    @pytest.mark.asyncio
+    async def test_per_call_timeout_overrides_default(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"], bash_timeout=120)
+        result = await registry.execute("bash", {"command": "sleep 5", "timeout": 1})
+        assert result.is_error is True
+        assert "timed out after 1s" in result.output
+
+    def test_build_builtin_registry_default(self) -> None:
+        reg = build_builtin_registry()
+        assert "bash" in reg
+        assert "30" in reg["bash"]["input_schema"]["properties"]["timeout"]["description"]
+
+    def test_build_builtin_registry_custom(self) -> None:
+        reg = build_builtin_registry(bash_timeout=90)
+        assert "90" in reg["bash"]["input_schema"]["properties"]["timeout"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_error(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"])
+        result = await registry.execute("bash", {"command": "echo hi", "timeout": 0})
+        assert result.is_error is True
+        assert "Invalid timeout" in result.output
+
+    @pytest.mark.asyncio
+    async def test_negative_timeout_returns_error(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"])
+        result = await registry.execute("bash", {"command": "echo hi", "timeout": -5})
+        assert result.is_error is True
+        assert "Invalid timeout" in result.output

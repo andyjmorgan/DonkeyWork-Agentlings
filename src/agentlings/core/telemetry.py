@@ -1,4 +1,4 @@
-"""OpenTelemetry setup and instrumentation for the sleep cycle and memory tool."""
+"""OpenTelemetry setup and instrumentation for the agent lifecycle."""
 
 from __future__ import annotations
 
@@ -119,12 +119,12 @@ def get_meter() -> Any:
 
 
 @contextmanager
-def sleep_span(name: str, attributes: dict[str, Any] | None = None) -> Generator[Any, None, None]:
-    """Context manager that creates a span for a sleep phase.
+def otel_span(name: str, attributes: dict[str, Any] | None = None) -> Generator[Any, None, None]:
+    """Context manager that creates a traced span.
 
     Args:
-        name: Span name (e.g. ``"agentling.sleep.light_sleep"``).
-        attributes: Span attributes to set.
+        name: Span name (e.g. ``"agentling.loop.process_message"``).
+        attributes: Span attributes to set on creation.
 
     Yields:
         The span object (or a no-op if telemetry is disabled).
@@ -135,6 +135,9 @@ def sleep_span(name: str, attributes: dict[str, Any] | None = None) -> Generator
             for k, v in attributes.items():
                 span.set_attribute(k, v)
         yield span
+
+
+sleep_span = otel_span
 
 
 class _NoOpSpan:

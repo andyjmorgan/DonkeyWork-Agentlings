@@ -14,12 +14,14 @@ from agentlings.config import (
 )
 
 
-def test_defaults(tmp_path: Path) -> None:
+def test_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
     data_dir = tmp_path / "data"
     config = AgentConfig(
         anthropic_api_key="sk-test",
         agent_api_key="key",
         agent_data_dir=data_dir,
+        _env_file=None,
     )
     assert config.agent_model == "claude-sonnet-4-6"
     assert config.agent_max_tokens == 4096
@@ -183,6 +185,22 @@ class TestAgentDefinition:
         assert defn.sleep is None
         assert defn.telemetry is None
 
+    def test_bash_timeout_default(self) -> None:
+        defn = AgentDefinition()
+        assert defn.bash_timeout == 30
+
+    def test_bash_timeout_custom(self) -> None:
+        defn = AgentDefinition(bash_timeout=120)
+        assert defn.bash_timeout == 120
+
+    def test_bash_timeout_zero_rejected(self) -> None:
+        with pytest.raises(Exception):
+            AgentDefinition(bash_timeout=0)
+
+    def test_bash_timeout_negative_rejected(self) -> None:
+        with pytest.raises(Exception):
+            AgentDefinition(bash_timeout=-1)
+
 
 class TestMemoryConfig:
     def test_defaults(self) -> None:
@@ -251,6 +269,21 @@ class TestYAMLWithNewSections:
         assert config.sleep_config is not None
         assert config.sleep_config.schedule == "0 3 * * *"
         assert config.sleep_config.memory_max_entries == 100
+
+    def test_bash_timeout_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "description: test\n"
+            "bash_timeout: 90\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.definition.bash_timeout == 90
 
     def test_telemetry_from_yaml(self, tmp_path: Path) -> None:
         yaml_file = tmp_path / "agent.yaml"

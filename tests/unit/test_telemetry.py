@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agentlings.config import TelemetryConfig
-from agentlings.core.telemetry import _NoOpMeter, _NoOpTracer, get_meter, get_tracer, sleep_span
+from agentlings.core.telemetry import _NoOpMeter, _NoOpTracer, get_meter, get_tracer, otel_span, sleep_span
 
 
 class TestNoOp:
@@ -20,9 +20,18 @@ class TestNoOp:
         counter = meter.create_counter("test")
         counter.add(1)
 
-    def test_sleep_span_works_without_init(self) -> None:
-        with sleep_span("test.span", {"key": "value"}) as span:
+    def test_otel_span_works_without_init(self) -> None:
+        with otel_span("test.span", {"key": "value"}) as span:
             span.set_attribute("extra", "attr")
+
+    def test_sleep_span_is_otel_span(self) -> None:
+        assert sleep_span is otel_span
+
+    def test_nested_spans(self) -> None:
+        with otel_span("parent") as parent:
+            parent.set_attribute("level", "parent")
+            with otel_span("child", {"level": "child"}) as child:
+                child.set_attribute("extra", "value")
 
 
 class TestGetTracer:

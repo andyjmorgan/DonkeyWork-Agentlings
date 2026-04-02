@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,41 +17,43 @@ DEFAULT_TIMEOUT = 30
 # ---------------------------------------------------------------------------
 
 
-def _bash(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
-    """Execute a shell command and capture its output.
+def _make_bash(default_timeout: int = DEFAULT_TIMEOUT) -> Callable[..., ToolResult]:
+    """Create a bash tool function with a configurable default timeout."""
 
-    Args:
-        command: The shell command string to execute.
-        timeout: Maximum seconds to wait before killing the process.
-
-    Returns:
-        Combined stdout/stderr on success, or a descriptive error message.
-    """
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += result.stderr
-        output = output.strip()
-        is_error = result.returncode != 0
-        if not output:
-            output = (
-                f"Command failed with exit code {result.returncode}"
-                if is_error
-                else "(no output)"
+    def _bash(command: str, timeout: int | None = None) -> ToolResult:
+        effective_timeout = timeout if timeout is not None else default_timeout
+        if effective_timeout <= 0:
+            return ToolResult(
+                output=f"Invalid timeout: {effective_timeout} (must be positive)",
+                is_error=True,
             )
-        return ToolResult(output=output, is_error=is_error)
-    except subprocess.TimeoutExpired:
-        return ToolResult(
-            output=f"Command timed out after {timeout} seconds",
-            is_error=True,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=effective_timeout,
+            )
+            output = result.stdout
+            if result.stderr:
+                output += result.stderr
+            output = output.strip()
+            is_error = result.returncode != 0
+            if not output:
+                output = (
+                    f"Command failed with exit code {result.returncode}"
+                    if is_error
+                    else "(no output)"
+                )
+            return ToolResult(output=output, is_error=is_error)
+        except subprocess.TimeoutExpired:
+            return ToolResult(
+                output=f"Command timed out after {effective_timeout}s",
+                is_error=True,
+            )
+
+    return _bash
 
 
 def _read_file(path: str, offset: int = 0, limit: int = 2000) -> ToolResult:
@@ -174,7 +177,9 @@ def _search_files(path: str, pattern: str) -> ToolResult:
 # ---------------------------------------------------------------------------
 
 
-BUILTIN_REGISTRY: dict[str, dict[str, Any]] = {
+def build_builtin_registry(bash_timeout: int = DEFAULT_TIMEOUT) -> dict[str, dict[str, Any]]:
+    """Build the built-in tool registry with configurable defaults."""
+    return {
     "bash": {
         "name": "bash",
         "description": "Execute a shell command and return its output.",
@@ -187,12 +192,12 @@ BUILTIN_REGISTRY: dict[str, dict[str, Any]] = {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 30)",
+                    "description": f"Timeout in seconds (default {bash_timeout})",
                 },
             },
             "required": ["command"],
         },
-        "execute_fn": _bash,
+        "execute_fn": _make_bash(bash_timeout),
     },
     "read_file": {
         "name": "read_file",
@@ -297,3 +302,6 @@ BUILTIN_REGISTRY: dict[str, dict[str, Any]] = {
         "execute_fn": _search_files,
     },
 }
+
+
+BUILTIN_REGISTRY = build_builtin_registry()
