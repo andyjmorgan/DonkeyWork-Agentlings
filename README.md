@@ -240,6 +240,10 @@ memory:
 
 ## Sleep cycle
 
+<p align="center">
+  <img src="sleep.png" alt="Sleep Cycle" width="256">
+</p>
+
 The sleep cycle is a nightly process that journals the day's activity, consolidates new knowledge into memory, prunes stale entries, and cleans up old files. It maps to biological sleep phases.
 
 ```mermaid
