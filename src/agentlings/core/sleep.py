@@ -304,16 +304,22 @@ class SleepCycle:
         self,
         batch_id: str,
         timeout: float = 7200,
-        interval: float = 10,
+        initial_interval: float = 5,
+        max_interval: float = 60,
     ) -> list[Any]:
-        """Poll a batch until completion or timeout."""
+        """Poll a batch until completion or timeout, using exponential backoff."""
         deadline = time.monotonic() + timeout
+        interval = initial_interval
         while time.monotonic() < deadline:
             status = await self._llm.batch_status(batch_id)
             if status.processing_status == "ended":
                 return await self._llm.batch_results(batch_id)
-            logger.debug("[SLEEP:DEEP] Batch %s: %s", batch_id, status.processing_status)
+            logger.debug(
+                "[SLEEP:DEEP] Batch %s: %s (next poll in %.0fs)",
+                batch_id, status.processing_status, interval,
+            )
             await asyncio.sleep(interval)
+            interval = min(interval * 2, max_interval)
 
         logger.warning("[SLEEP:DEEP] Batch %s timed out after %.0fs", batch_id, timeout)
         try:

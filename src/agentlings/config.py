@@ -93,6 +93,7 @@ class AgentDefinition(BaseModel):
         tools: Tool names or groups to enable (e.g. ``["bash", "filesystem"]``).
         skills: Skills to advertise in the Agent Card.
         system_prompt: The system prompt sent to the LLM.
+        bash_timeout: Default timeout in seconds for bash tool commands.
     """
 
     name: str = "agentling"
@@ -100,6 +101,7 @@ class AgentDefinition(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[SkillConfig] = Field(default_factory=list)
     system_prompt: str | None = None
+    bash_timeout: int = 30
     memory: MemoryConfig | None = None
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None

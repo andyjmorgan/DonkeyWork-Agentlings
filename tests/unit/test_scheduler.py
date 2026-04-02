@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agentlings.core.scheduler import cron_matches, parse_cron_field
+from agentlings.core.scheduler import _convert_dow, cron_matches, parse_cron_field
 
 
 class TestParseCronField:
@@ -50,3 +50,24 @@ class TestCronMatches:
     def test_invalid_field_count(self) -> None:
         with pytest.raises(ValueError, match="Expected 5 cron fields"):
             cron_matches("* * *", datetime.now(timezone.utc))
+
+
+class TestConvertDow:
+    def test_valid_conversion(self) -> None:
+        result = _convert_dow({0, 1, 6})
+        assert result == {6, 0, 5}
+
+    def test_all_days(self) -> None:
+        result = _convert_dow({0, 1, 2, 3, 4, 5, 6})
+        assert result == {0, 1, 2, 3, 4, 5, 6}
+
+    def test_empty_set(self) -> None:
+        assert _convert_dow(set()) == set()
+
+    def test_invalid_value_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid day-of-week"):
+            _convert_dow({7})
+
+    def test_mixed_valid_and_invalid_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid day-of-week"):
+            _convert_dow({0, 1, 8})

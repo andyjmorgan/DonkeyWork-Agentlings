@@ -99,18 +99,19 @@ class ToolRegistry:
             return await fn(**input_dict)
         return await asyncio.to_thread(fn, **input_dict)
 
-    def register_tools(self, enabled: list[str]) -> None:
+    def register_tools(self, enabled: list[str], bash_timeout: int = 30) -> None:
         """Register built-in tools by name or group.
 
         Args:
             enabled: List of tool names or group names (e.g. ``"bash"``, ``"filesystem"``)
                      to activate from the built-in registry.
+            bash_timeout: Default timeout in seconds for the bash tool.
         """
-        from agentlings.tools.builtins import BUILTIN_REGISTRY
+        from agentlings.tools.builtins import build_builtin_registry
         from agentlings.tools.memory import MEMORY_TOOL_DEFINITION
 
         all_tools: dict[str, dict[str, Any]] = {
-            **BUILTIN_REGISTRY,
+            **build_builtin_registry(bash_timeout),
             MEMORY_TOOL_DEFINITION["name"]: MEMORY_TOOL_DEFINITION,
         }
 
@@ -121,17 +122,21 @@ class ToolRegistry:
             else:
                 resolved.add(name)
 
+        unknown = sorted(resolved - all_tools.keys())
+        if unknown:
+            raise ValueError(
+                f"Unknown tools in agent config: {unknown}. "
+                f"Available: {sorted(all_tools.keys())}"
+            )
+
         for tool_name in sorted(resolved):
-            if tool_name in all_tools:
-                defn = all_tools[tool_name]
-                self.register(
-                    name=defn["name"],
-                    description=defn["description"],
-                    input_schema=defn["input_schema"],
-                    execute_fn=defn["execute_fn"],
-                )
-            else:
-                logger.warning("unknown tool: %s", tool_name)
+            defn = all_tools[tool_name]
+            self.register(
+                name=defn["name"],
+                description=defn["description"],
+                input_schema=defn["input_schema"],
+                execute_fn=defn["execute_fn"],
+            )
 
 
 @dataclass

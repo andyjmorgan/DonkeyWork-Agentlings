@@ -94,7 +94,10 @@ def cron_matches(expression: str, dt: datetime) -> bool:
 def _convert_dow(cron_dow: set[int]) -> set[int]:
     """Convert cron day-of-week (0=Sunday) to Python weekday (0=Monday)."""
     mapping = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
-    return {mapping[d] for d in cron_dow if d in mapping}
+    invalid = cron_dow - mapping.keys()
+    if invalid:
+        raise ValueError(f"Invalid day-of-week values: {sorted(invalid)} (must be 0-6)")
+    return {mapping[d] for d in cron_dow}
 
 
 async def run_scheduler(
