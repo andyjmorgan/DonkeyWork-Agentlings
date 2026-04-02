@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import time
@@ -128,27 +129,41 @@ async def run_completion(
                 ", ".join(b["name"] for b in tool_calls),
             )
 
-            tool_results = []
-            for block in tool_calls:
-                with otel_span("agentling.completion.tool_exec", {
-                    "tool.name": block["name"],
-                    "completion.turn": turn_number,
-                }) as tool_span:
-                    result = await tools.execute(block["name"], block.get("input", {}))
-                    tool_span.set_attribute("tool.is_error", result.is_error)
+            async def _exec_tool(block: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    with otel_span("agentling.completion.tool_exec", {
+                        "tool.name": block["name"],
+                        "completion.turn": turn_number,
+                    }) as tool_span:
+                        result = await tools.execute(block["name"], block.get("input", {}))
+                        tool_span.set_attribute("tool.is_error", result.is_error)
 
-                tool_attrs = {"tool.name": block["name"]}
-                metrics["tool_calls"].add(1, tool_attrs)
-                if result.is_error:
-                    metrics["tool_errors"].add(1, tool_attrs)
-                    logger.warning("tool %s returned error: %.200s", block["name"], result.output)
+                    tool_attrs = {"tool.name": block["name"]}
+                    metrics["tool_calls"].add(1, tool_attrs)
+                    if result.is_error:
+                        metrics["tool_errors"].add(1, tool_attrs)
+                        logger.warning("tool %s returned error: %.200s", block["name"], result.output)
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": result.output,
-                    "is_error": result.is_error,
-                })
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": result.output,
+                        "is_error": result.is_error,
+                    }
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("unhandled exception in tool %s", block["name"])
+                    metrics["tool_calls"].add(1, {"tool.name": block["name"]})
+                    metrics["tool_errors"].add(1, {"tool.name": block["name"]})
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": f"Tool {block['name']} failed with an internal error",
+                        "is_error": True,
+                    }
+
+            tool_results = list(await asyncio.gather(*(_exec_tool(b) for b in tool_calls)))
 
             turns.append(CompletionTurn(response=response, tool_results=tool_results))
             messages.append({"role": "user", "content": tool_results})

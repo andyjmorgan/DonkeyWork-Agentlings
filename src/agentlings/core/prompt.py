@@ -63,7 +63,12 @@ def build_system_prompt(
             "type": "text",
             "text": text,
             "cache_control": {"type": "ephemeral"},
-        }
+        },
+        {
+            "type": "text",
+            "text": _execution_rules(),
+            "cache_control": {"type": "ephemeral"},
+        },
     ]
 
     if memory and memory.entries:
@@ -109,6 +114,25 @@ def _build_memory_block(
         included.pop()
         logger.debug("memory block over budget, dropped to %d entries", len(included))
     return None
+
+
+def _execution_rules() -> str:
+    """Execution constraints applied to every agent regardless of system prompt."""
+    return """\
+You operate under strict time constraints — every request has a limited execution \
+window. Follow these rules:
+1. PLAN FIRST: Before touching any tool, state what you will do and roughly how \
+many steps it requires. If more than a few tool calls are needed, say so upfront.
+2. STAY FOCUSED: Do exactly what was asked. Do not explore, refactor, or improve \
+things that were not requested.
+3. DELIVER INCREMENTALLY: After each meaningful step, summarize what you completed \
+and what remains. If the remaining work is non-trivial, ask whether to continue \
+rather than pressing on silently.
+4. PREFER COMPLETE OVER AMBITIOUS: A small, finished result is better than a \
+large, half-done one. If the request is too broad to finish, do the most valuable \
+slice and report what is left.
+5. CLARIFY EARLY: If the request is ambiguous, ask before acting — do not guess \
+and waste cycles."""
 
 
 def _default_prompt(config: AgentConfig) -> str:
