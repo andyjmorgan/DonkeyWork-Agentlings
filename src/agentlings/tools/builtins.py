@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,16 @@ DEFAULT_TIMEOUT = 30
 # ---------------------------------------------------------------------------
 
 
-def _make_bash(default_timeout: int = DEFAULT_TIMEOUT) -> callable:
+def _make_bash(default_timeout: int = DEFAULT_TIMEOUT) -> Callable[..., ToolResult]:
     """Create a bash tool function with a configurable default timeout."""
 
     def _bash(command: str, timeout: int | None = None) -> ToolResult:
         effective_timeout = timeout if timeout is not None else default_timeout
+        if effective_timeout <= 0:
+            return ToolResult(
+                output=f"Invalid timeout: {effective_timeout} (must be positive)",
+                is_error=True,
+            )
         try:
             result = subprocess.run(
                 command,
@@ -43,7 +49,7 @@ def _make_bash(default_timeout: int = DEFAULT_TIMEOUT) -> callable:
             return ToolResult(output=output, is_error=is_error)
         except subprocess.TimeoutExpired:
             return ToolResult(
-                output=f"Command timed out after {effective_timeout} seconds",
+                output=f"Command timed out after {effective_timeout}s",
                 is_error=True,
             )
 

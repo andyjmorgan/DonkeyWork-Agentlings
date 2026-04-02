@@ -101,7 +101,7 @@ class AgentDefinition(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[SkillConfig] = Field(default_factory=list)
     system_prompt: str | None = None
-    bash_timeout: int = 30
+    bash_timeout: int = Field(ge=1, default=30)
     memory: MemoryConfig | None = None
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None

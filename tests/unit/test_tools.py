@@ -253,7 +253,7 @@ class TestBashTimeout:
         registry.register_tools(["bash"], bash_timeout=1)
         result = await registry.execute("bash", {"command": "sleep 5"})
         assert result.is_error is True
-        assert "timed out after 1 seconds" in result.output
+        assert "timed out after 1s" in result.output
 
     @pytest.mark.asyncio
     async def test_per_call_timeout_overrides_default(self) -> None:
@@ -261,7 +261,7 @@ class TestBashTimeout:
         registry.register_tools(["bash"], bash_timeout=120)
         result = await registry.execute("bash", {"command": "sleep 5", "timeout": 1})
         assert result.is_error is True
-        assert "timed out after 1 seconds" in result.output
+        assert "timed out after 1s" in result.output
 
     def test_build_builtin_registry_default(self) -> None:
         reg = build_builtin_registry()
@@ -271,3 +271,19 @@ class TestBashTimeout:
     def test_build_builtin_registry_custom(self) -> None:
         reg = build_builtin_registry(bash_timeout=90)
         assert "90" in reg["bash"]["input_schema"]["properties"]["timeout"]["description"]
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_error(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"])
+        result = await registry.execute("bash", {"command": "echo hi", "timeout": 0})
+        assert result.is_error is True
+        assert "Invalid timeout" in result.output
+
+    @pytest.mark.asyncio
+    async def test_negative_timeout_returns_error(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tools(["bash"])
+        result = await registry.execute("bash", {"command": "echo hi", "timeout": -5})
+        assert result.is_error is True
+        assert "Invalid timeout" in result.output

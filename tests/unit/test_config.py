@@ -193,6 +193,14 @@ class TestAgentDefinition:
         defn = AgentDefinition(bash_timeout=120)
         assert defn.bash_timeout == 120
 
+    def test_bash_timeout_zero_rejected(self) -> None:
+        with pytest.raises(Exception):
+            AgentDefinition(bash_timeout=0)
+
+    def test_bash_timeout_negative_rejected(self) -> None:
+        with pytest.raises(Exception):
+            AgentDefinition(bash_timeout=-1)
+
 
 class TestMemoryConfig:
     def test_defaults(self) -> None:

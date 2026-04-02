@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -13,32 +14,27 @@ from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-_meter = None
-
-
-def _get_metrics():
-    global _meter
-    if _meter is None:
-        m = get_meter()
-        _meter = {
-            "duration": m.create_histogram(
-                "agentling.completion.duration_seconds",
-                description="End-to-end completion cycle duration",
-            ),
-            "turns": m.create_histogram(
-                "agentling.completion.turns",
-                description="Number of LLM turns per completion cycle",
-            ),
-            "tool_calls": m.create_counter(
-                "agentling.tool.calls",
-                description="Total tool invocations",
-            ),
-            "tool_errors": m.create_counter(
-                "agentling.tool.errors",
-                description="Tool execution errors",
-            ),
-        }
-    return _meter
+@functools.lru_cache(maxsize=1)
+def _get_metrics() -> dict[str, Any]:
+    m = get_meter()
+    return {
+        "duration": m.create_histogram(
+            "agentling.completion.duration_seconds",
+            description="End-to-end completion cycle duration",
+        ),
+        "turns": m.create_histogram(
+            "agentling.completion.turns",
+            description="Number of LLM turns per completion cycle",
+        ),
+        "tool_calls": m.create_counter(
+            "agentling.tool.calls",
+            description="Total tool invocations",
+        ),
+        "tool_errors": m.create_counter(
+            "agentling.tool.errors",
+            description="Tool execution errors",
+        ),
+    }
 
 
 @dataclass
