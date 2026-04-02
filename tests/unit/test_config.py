@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from agentlings.config import AgentConfig, AgentDefinition, SkillConfig
+from agentlings.config import (
+    AgentConfig,
+    AgentDefinition,
+    MemoryConfig,
+    SkillConfig,
+    SleepConfig,
+    TelemetryConfig,
+)
 
 
 def test_defaults(tmp_path: Path) -> None:
@@ -169,3 +176,97 @@ class TestAgentDefinition:
         )
         assert skill.id == "test"
         assert skill.tags == ["a", "b"]
+
+    def test_new_config_sections_default_none(self) -> None:
+        defn = AgentDefinition()
+        assert defn.memory is None
+        assert defn.sleep is None
+        assert defn.telemetry is None
+
+
+class TestMemoryConfig:
+    def test_defaults(self) -> None:
+        config = MemoryConfig()
+        assert config.token_budget == 2000
+        assert config.injection_prompt is None
+
+    def test_custom_values(self) -> None:
+        config = MemoryConfig(token_budget=500, injection_prompt="custom: {entries}")
+        assert config.token_budget == 500
+
+
+class TestSleepConfig:
+    def test_defaults(self) -> None:
+        config = SleepConfig()
+        assert config.schedule == "0 2 * * *"
+        assert config.journal_retention_days == 30
+        assert config.conversation_retention_days == 14
+        assert config.memory_max_entries == 50
+        assert config.model is None
+        assert config.summary_prompt is None
+        assert config.consolidation_prompt is None
+
+
+class TestTelemetryConfig:
+    def test_defaults(self) -> None:
+        config = TelemetryConfig()
+        assert config.enabled is False
+        assert config.protocol == "http"
+        assert config.insecure is True
+
+
+class TestYAMLWithNewSections:
+    def test_memory_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "description: test\n"
+            "memory:\n"
+            "  token_budget: 500\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.memory_config is not None
+        assert config.memory_config.token_budget == 500
+
+    def test_sleep_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "description: test\n"
+            "sleep:\n"
+            "  schedule: '0 3 * * *'\n"
+            "  memory_max_entries: 100\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.sleep_config is not None
+        assert config.sleep_config.schedule == "0 3 * * *"
+        assert config.sleep_config.memory_max_entries == 100
+
+    def test_telemetry_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "description: test\n"
+            "telemetry:\n"
+            "  enabled: true\n"
+            "  endpoint: http://otel:4318\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.telemetry_config is not None
+        assert config.telemetry_config.enabled is True
+        assert config.telemetry_config.endpoint == "http://otel:4318"

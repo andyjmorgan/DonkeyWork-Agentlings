@@ -4,6 +4,7 @@ description: A helpful AI assistant
 tools:
   - bash
   - filesystem
+  - memory
 
 skills:
   - id: general
@@ -18,3 +19,23 @@ system_prompt: |
   incorporate it into your response.
 
   Be concise. Use code blocks for command output.
+
+memory:
+  token_budget: 2000
+  # injection_prompt: null  # override the memory injection template
+
+sleep:
+  schedule: "0 2 * * *"
+  journal_retention_days: 30
+  conversation_retention_days: 14
+  memory_max_entries: 50
+  # model: null             # override model for sleep LLM calls
+  # summary_prompt: null    # override per-conversation summary prompt
+  # consolidation_prompt: null  # override REM consolidation prompt
+
+telemetry:
+  enabled: false
+  endpoint: "http://localhost:4318"
+  protocol: "http"
+  service_name: "agentling"
+  insecure: true

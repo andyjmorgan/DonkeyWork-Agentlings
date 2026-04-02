@@ -4,3 +4,13 @@ description: A test agent
 tools:
   - bash
   - filesystem
+  - memory
+
+memory:
+  token_budget: 2000
+
+sleep:
+  schedule: "0 2 * * *"
+  conversation_retention_days: 14
+  journal_retention_days: 30
+  memory_max_entries: 50
