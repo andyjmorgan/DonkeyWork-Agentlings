@@ -150,6 +150,8 @@ async def run_completion(
                         "content": result.output,
                         "is_error": result.is_error,
                     }
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     logger.exception("unhandled exception in tool %s", block["name"])
                     metrics["tool_calls"].add(1, {"tool.name": block["name"]})
