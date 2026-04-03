@@ -57,7 +57,7 @@ class TestLightSleep:
         result = cycle._light_sleep(datetime.now(timezone.utc))
         assert result == []
 
-    def test_finds_todays_conversations(self, sleep_deps, tmp_data_dir: Path) -> None:
+    def test_finds_yesterdays_conversations(self, sleep_deps, tmp_data_dir: Path) -> None:
         cycle, store, _, _ = sleep_deps
         store.create("test-ctx")
         store.append("test-ctx", MessageEntry(
@@ -66,9 +66,9 @@ class TestLightSleep:
         ))
 
         path = tmp_data_dir / "test-ctx.jsonl"
-        old_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
         import os
-        os.utime(path, (old_time.timestamp(), old_time.timestamp()))
+        os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
 
         result = cycle._light_sleep(datetime.now(timezone.utc))
         assert len(result) == 1
@@ -85,12 +85,13 @@ class TestDeepSleep:
         ))
 
         path = tmp_data_dir / "ctx-1.jsonl"
-        old_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
         import os
-        os.utime(path, (old_time.timestamp(), old_time.timestamp()))
+        os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
 
         conversations = cycle._light_sleep(datetime.now(timezone.utc))
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        review_date = datetime.now(timezone.utc) - timedelta(days=1)
+        date_str = review_date.strftime("%Y-%m-%d")
         summaries, candidates = await cycle._deep_sleep(conversations, date_str)
 
         journal_path = tmp_data_dir / "journals" / f"{date_str}.md"
@@ -130,6 +131,64 @@ class TestHousekeeping:
 
         cycle._housekeeping(datetime.now(timezone.utc))
         assert not old_journal.exists()
+
+
+class TestLightSleepTimeWindow:
+    """Verify the lookback window catches conversations from the previous day.
+
+    The sleep cycle typically fires at 02:00 UTC to review the previous day's
+    work. Conversations from 09:00–18:00 UTC yesterday must be discovered,
+    not just those from after midnight.
+    """
+
+    def test_02am_discovers_yesterdays_conversations(self, sleep_deps, tmp_data_dir: Path) -> None:
+        """The exact scenario that caused the production bug: sleep at 02:00,
+        conversations from yesterday afternoon are invisible."""
+        cycle, store, _, _ = sleep_deps
+        store.create("afternoon-ctx")
+        store.append("afternoon-ctx", MessageEntry(
+            ctx="afternoon-ctx", role="user",
+            content=[{"type": "text", "text": "afternoon work"}],
+        ))
+
+        path = tmp_data_dir / "afternoon-ctx.jsonl"
+        yesterday_3pm = datetime(2026, 4, 2, 15, 0, tzinfo=timezone.utc)
+        import os
+        os.utime(path, (yesterday_3pm.timestamp(), yesterday_3pm.timestamp()))
+
+        sleep_time = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+        result = cycle._light_sleep(sleep_time)
+        assert len(result) == 1, "Yesterday afternoon's conversation was not discovered"
+
+    def test_ignores_conversations_older_than_lookback(self, sleep_deps, tmp_data_dir: Path) -> None:
+        cycle, store, _, _ = sleep_deps
+        store.create("old-ctx")
+        store.append("old-ctx", MessageEntry(
+            ctx="old-ctx", role="user",
+            content=[{"type": "text", "text": "ancient history"}],
+        ))
+
+        path = tmp_data_dir / "old-ctx.jsonl"
+        two_days_ago = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc)
+        import os
+        os.utime(path, (two_days_ago.timestamp(), two_days_ago.timestamp()))
+
+        sleep_time = datetime(2026, 4, 3, 2, 0, tzinfo=timezone.utc)
+        result = cycle._light_sleep(sleep_time)
+        assert len(result) == 0, "Conversation from 2 days ago should not be picked up"
+
+    def test_ignores_active_conversations(self, sleep_deps, tmp_data_dir: Path) -> None:
+        """Conversations modified within the grace period must be skipped —
+        they may still be in-flight."""
+        cycle, store, _, _ = sleep_deps
+        store.create("active-ctx")
+        store.append("active-ctx", MessageEntry(
+            ctx="active-ctx", role="user",
+            content=[{"type": "text", "text": "still talking"}],
+        ))
+
+        result = cycle._light_sleep(datetime.now(timezone.utc))
+        assert len(result) == 0, "Active conversation should be excluded by grace period"
 
 
 class TestFullCycle:

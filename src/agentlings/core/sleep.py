@@ -72,13 +72,15 @@ class SleepCycle:
         self._sleep_config = config.sleep_config or SleepConfig()
 
     async def run(self, date: datetime | None = None) -> None:
-        """Execute the full sleep cycle for the given date.
+        """Execute the full sleep cycle reviewing the previous day's conversations.
 
         Args:
-            date: The date to process (defaults to today UTC).
+            date: Reference timestamp (defaults to now UTC). The cycle reviews
+                  conversations from the day before this timestamp.
         """
         date = date or datetime.now(timezone.utc)
-        date_str = date.strftime("%Y-%m-%d")
+        review_date = date - timedelta(days=1)
+        date_str = review_date.strftime("%Y-%m-%d")
         start = time.monotonic()
         logger.info("[SLEEP] Starting cycle for %s", date_str)
 
@@ -107,12 +109,13 @@ class SleepCycle:
         logger.info("[SLEEP] Cycle complete in %.1fs", elapsed)
 
     def _light_sleep(self, date: datetime) -> list[Path]:
-        """Phase 1: Check for today's conversations.
+        """Phase 1: Discover conversations from the previous 24 hours.
 
-        Returns JSONL files that were modified today and are idle.
+        Returns JSONL files that were modified since yesterday's midnight and
+        have been idle long enough to be safe to process.
         """
         data_dir = self._config.agent_data_dir
-        cutoff_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_start = date.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         grace_cutoff = datetime.now(timezone.utc) - timedelta(seconds=IDLE_GRACE_SECONDS)
 
         conversations = []
