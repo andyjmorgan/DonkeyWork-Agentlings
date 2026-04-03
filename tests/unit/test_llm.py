@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from agentlings.core.llm import MockLLMClient, create_llm_client
+from agentlings.core.llm import AnthropicLLMClient, MockLLMClient, create_llm_client
 
 
 class TestMockLLMClient:
@@ -60,6 +63,52 @@ class TestMockLLMClient:
             tools=[],
         )
         assert response.content[0]["type"] == "text"
+
+
+class TestAnthropicBatchResults:
+    """Verify batch_results correctly awaits the SDK's coroutine before iterating.
+
+    The Anthropic SDK's batches.results() returns a coroutine that resolves
+    to an async iterator. Missing the await causes 'async for requires an
+    object with __aiter__ method, got coroutine' — which silently killed the
+    sleep cycle's journal write in production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_batch_results_awaits_before_iterating(self) -> None:
+        """Simulate the real SDK pattern: results() is a coroutine returning an async iterator."""
+        succeeded_entry = MagicMock()
+        succeeded_entry.custom_id = "ctx-1"
+        succeeded_entry.result.type = "succeeded"
+        text_block = MagicMock()
+        text_block.model_dump.return_value = {"type": "text", "text": "summary"}
+        succeeded_entry.result.message.content = [text_block]
+
+        failed_entry = MagicMock()
+        failed_entry.custom_id = "ctx-2"
+        failed_entry.result.type = "errored"
+        failed_entry.result.error = "rate limit"
+
+        async def _async_iter():
+            for entry in [succeeded_entry, failed_entry]:
+                yield entry
+
+        mock_client = MagicMock()
+        mock_client.messages.batches.results = AsyncMock(return_value=_async_iter())
+
+        client = AnthropicLLMClient.__new__(AnthropicLLMClient)
+        client._client = mock_client
+
+        results = await client.batch_results("batch-123")
+
+        mock_client.messages.batches.results.assert_awaited_once_with("batch-123")
+        assert len(results) == 2
+        assert results[0].custom_id == "ctx-1"
+        assert results[0].status == "succeeded"
+        assert results[0].content == [{"type": "text", "text": "summary"}]
+        assert results[1].custom_id == "ctx-2"
+        assert results[1].status == "failed"
+        assert results[1].error == "rate limit"
 
 
 class TestFactory:
