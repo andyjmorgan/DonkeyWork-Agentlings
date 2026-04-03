@@ -31,12 +31,21 @@ IDLE_GRACE_SECONDS = 300
 DEFAULT_SUMMARY_PROMPT = """\
 You are performing a nightly review of a conversation that took place today.
 
-Produce a concise summary of what happened: what was asked, what actions were \
-taken, what the outcome was, and anything left unresolved.
+Summarise in 2-3 sentences maximum: what was asked, what was the outcome, \
+what changed. Do not reproduce command output, resource listings, or \
+step-by-step details — those are in the conversation logs if needed later.
 
-Extract any facts worth adding to your long-term memory. Only extract NEW facts \
-not already in your current memory. Focus on operational knowledge, patterns, \
-decisions, things that changed. Ignore passing context.
+Extract memory candidates in these categories. Only extract NEW facts not \
+already in your current memory or system prompt:
+- INCIDENTS: What broke, what fixed it, and the specific values applied \
+(e.g. resource limits, config changes, rollback steps).
+- UNRESOLVED: Findings that need follow-up but were not addressed today.
+- BASELINES: Resource values, counts, or thresholds that would help detect \
+drift or inform future decisions.
+- DECISIONS: Choices made and why, especially where alternatives were rejected.
+
+Do NOT extract routine health checks with no findings, one-off queries, \
+or facts already in your system prompt.
 
 If the conversation was trivial or contained nothing new worth remembering, \
 return an empty memory_candidates list."""
@@ -48,8 +57,14 @@ Your job:
 1. Integrate new candidates that add genuine value. Deduplicate against existing entries.
 2. Review every existing entry. Is it still relevant? Has it been superseded by \
 something learned today? Would it help you do your job tomorrow?
-3. Drop anything that is stale, redundant, or no longer operationally useful.
+3. Drop entries that are genuinely superseded or no longer relevant.
 4. You have a hard limit of {memory_max_entries} entries.
+
+Bias toward KEEPING entries that describe:
+- How a specific incident was resolved (these save hours when it recurs).
+- Known gaps or risks that have not been addressed.
+- Resource limits, thresholds, or configuration values that were tuned.
+When in doubt, keep — an extra entry costs tokens, a forgotten incident costs hours.
 
 Preserve the recorded timestamp for entries you keep unchanged.
 Set recorded to the current date for new or modified entries."""
