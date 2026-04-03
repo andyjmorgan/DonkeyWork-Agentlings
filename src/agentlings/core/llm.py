@@ -90,6 +90,7 @@ class BaseLLMClient(ABC):
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """Send a completion request and return the full response.
 
@@ -97,6 +98,8 @@ class BaseLLMClient(ABC):
             system: System prompt blocks.
             messages: Conversation message history.
             tools: Tool schemas available to the model.
+            output_schema: JSON Schema for structured output. When provided,
+                the model is constrained to return valid JSON matching this schema.
 
         Returns:
             The model's response content and stop reason.
@@ -187,6 +190,7 @@ class AnthropicLLMClient(BaseLLMClient):
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -196,6 +200,13 @@ class AnthropicLLMClient(BaseLLMClient):
         }
         if tools:
             kwargs["tools"] = tools
+        if output_schema:
+            kwargs["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": output_schema,
+                }
+            }
 
         response = await self._client.messages.create(**kwargs)
         return LLMResponse(
@@ -310,6 +321,7 @@ class MockLLMClient(BaseLLMClient):
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         self._call_count += 1
         last_message = messages[-1] if messages else {}

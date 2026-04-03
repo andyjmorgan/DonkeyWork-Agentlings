@@ -246,6 +246,7 @@ class SleepCycle:
             system=system,
             messages=[{"role": "user", "content": user_content}],
             tools=[],
+            output_schema=strict_json_schema(ConsolidatedMemory),
         )
 
         text = self._extract_structured_text(response.content)
