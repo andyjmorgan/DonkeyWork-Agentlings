@@ -110,7 +110,7 @@ class ControllableLLM(BaseLLMClient):
 class TestTaskRegistry:
     async def test_register_creates_entry(self) -> None:
         reg = TaskRegistry()
-        rec = await reg.register("t1", "ctx1", "hello", via="mcp")
+        rec = reg.register("t1", "ctx1", "hello", via="mcp")
         assert rec.task_id == "t1"
         assert rec.context_id == "ctx1"
         assert rec.message == "hello"
@@ -120,33 +120,33 @@ class TestTaskRegistry:
 
     async def test_register_rejects_busy_context(self) -> None:
         reg = TaskRegistry()
-        await reg.register("t1", "ctx1", "hello")
+        reg.register("t1", "ctx1", "hello")
         with pytest.raises(ContextBusyError) as exc_info:
-            await reg.register("t2", "ctx1", "second")
+            reg.register("t2", "ctx1", "second")
         assert exc_info.value.context_id == "ctx1"
         assert exc_info.value.active_task_id == "t1"
 
     async def test_register_allows_different_contexts_concurrently(self) -> None:
         reg = TaskRegistry()
-        await reg.register("t1", "ctxA", "hi")
-        await reg.register("t2", "ctxB", "hi")
+        reg.register("t1", "ctxA", "hi")
+        reg.register("t2", "ctxB", "hi")
         assert reg.active_count() == 2
 
     async def test_unregister_frees_context(self) -> None:
         reg = TaskRegistry()
-        await reg.register("t1", "ctx1", "hi")
-        await reg.unregister("t1")
+        reg.register("t1", "ctx1", "hi")
+        reg.unregister("t1")
         assert reg.active_count() == 0
         # Same context can now register again.
-        await reg.register("t2", "ctx1", "hi")
+        reg.register("t2", "ctx1", "hi")
 
     async def test_unregister_missing_is_noop(self) -> None:
         reg = TaskRegistry()
-        await reg.unregister("never-registered")
+        reg.unregister("never-registered")
 
     async def test_get_returns_record(self) -> None:
         reg = TaskRegistry()
-        await reg.register("t1", "ctx1", "hi")
+        reg.register("t1", "ctx1", "hi")
         rec = reg.get("t1")
         assert rec is not None
         assert rec.task_id == "t1"
@@ -157,13 +157,13 @@ class TestTaskRegistry:
 
     async def test_get_by_context_returns_live_task(self) -> None:
         reg = TaskRegistry()
-        await reg.register("t1", "ctx1", "hi")
+        reg.register("t1", "ctx1", "hi")
         rec = reg.get_by_context("ctx1")
         assert rec is not None and rec.task_id == "t1"
 
     async def test_request_cancel_flips_flag(self) -> None:
         reg = TaskRegistry()
-        rec = await reg.register("t1", "ctx1", "hi")
+        rec = reg.register("t1", "ctx1", "hi")
         assert rec.cancel_flag is False
         ok = reg.request_cancel("t1")
         assert ok is True
@@ -804,11 +804,11 @@ class TestCompactionPort:
 
 
 # --------------------------------------------------------------------------- #
-# Engine: input validation
+# Engine: context-busy error surface
 # --------------------------------------------------------------------------- #
 
 
-class TestInputValidation:
+class TestContextBusySurface:
     async def test_context_busy_error_surface_has_active_task(
         self, tmp_data_dir: Path, test_config: AgentConfig
     ) -> None:
@@ -1000,6 +1000,39 @@ class TestShutdown:
         await asyncio.wait_for(engine.shutdown(grace_seconds=0.2), timeout=2.0)
 
         assert len(engine._workers) == 0  # noqa: SLF001
+
+    async def test_hard_cancel_releases_registry(
+        self, tmp_data_dir: Path, test_config: AgentConfig
+    ) -> None:
+        """Regression: hard-cancel used to interrupt registry cleanup.
+
+        Prior bug: ``TaskWorker.run()`` awaited an async ``unregister`` in
+        its ``finally`` block. When shutdown's grace period expired and the
+        worker was hard-cancelled, the re-delivered ``CancelledError``
+        could propagate through that await, leaving the task stuck in the
+        registry (permanent ``context_busy`` and a leaked per-context lock).
+        """
+        from tests.unit.test_task import ControllableLLM
+
+        llm = ControllableLLM()
+        store = JournalStore(tmp_data_dir)
+        tools = ToolRegistry()
+        engine = TaskEngine(config=test_config, store=store, llm=llm, tools=tools)
+
+        ctx = str(uuid4())
+        state = await engine.spawn("forever", context_id=ctx, await_seconds=0.05)
+        assert state.status == TaskStatus.WORKING
+
+        # LLM never answers — force hard-cancel past the grace window.
+        await asyncio.wait_for(engine.shutdown(grace_seconds=0.1), timeout=2.0)
+        await asyncio.sleep(0.05)  # let done-callback drain
+
+        assert engine.registry.active_count() == 0, (
+            "registry must release state even on hard-cancel"
+        )
+        assert engine.registry.get(state.task_id) is None
+        assert engine.registry.get_by_context(ctx) is None
+        assert ctx not in engine._context_locks  # noqa: SLF001
 
 
 class TestCrashRecoveryRegressions:

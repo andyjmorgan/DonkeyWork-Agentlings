@@ -117,9 +117,23 @@ def create_mcp_server(
         message = arguments.get("message")
         task_id = arguments.get("taskId")
         context_id = arguments.get("contextId")
-        wait_seconds = float(arguments.get("waitSeconds") or 0)
 
-        # Input validation — one of message XOR taskId.
+        wait_seconds_raw = arguments.get("waitSeconds")
+        try:
+            wait_seconds = (
+                0.0 if wait_seconds_raw is None else float(wait_seconds_raw)
+            )
+        except (TypeError, ValueError):
+            return _error_payload(
+                "invalid_input",
+                "`waitSeconds` must be a non-negative number.",
+            )
+        if wait_seconds < 0:
+            return _error_payload(
+                "invalid_input",
+                "`waitSeconds` must be a non-negative number.",
+            )
+
         if (message is None or message == "") and not task_id:
             return _error_payload(
                 "invalid_input",

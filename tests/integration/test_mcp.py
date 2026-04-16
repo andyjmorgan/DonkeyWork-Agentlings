@@ -138,3 +138,4 @@ class TestMCPInputValidation:
         """
         result = await mcp_client.call_invalid({"message": "   \n\t  "})
         assert result.raw.get("error") == "invalid_input"
+

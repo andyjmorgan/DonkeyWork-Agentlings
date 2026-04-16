@@ -229,14 +229,21 @@ class TaskRegistry:
     One task per context at a time — attempting to register a second task
     for the same context raises ``ContextBusyError``. Terminal tasks are
     removed immediately via ``unregister``.
+
+    All mutations are synchronous. asyncio is single-threaded and there
+    are no ``await`` points inside the critical sections here, so the
+    "check then set" in ``register`` runs atomically without needing an
+    ``asyncio.Lock``. Keeping these methods synchronous also means
+    ``unregister`` in a worker's ``finally`` block cannot be interrupted
+    by a re-delivered ``CancelledError`` during shutdown — the registry
+    always releases state cleanly.
     """
 
     def __init__(self) -> None:
         self._tasks: dict[str, TaskRecord] = {}
         self._by_context: dict[str, str] = {}
-        self._lock = asyncio.Lock()
 
-    async def register(
+    def register(
         self,
         task_id: str,
         context_id: str,
@@ -249,29 +256,27 @@ class TaskRegistry:
         Raises:
             ContextBusyError: If ``context_id`` already has a live task.
         """
-        async with self._lock:
-            if context_id in self._by_context:
-                raise ContextBusyError(
-                    context_id=context_id,
-                    active_task_id=self._by_context[context_id],
-                )
-            record = TaskRecord(
-                task_id=task_id,
+        if context_id in self._by_context:
+            raise ContextBusyError(
                 context_id=context_id,
-                message=message,
-                via=via,
-                owner=owner,
+                active_task_id=self._by_context[context_id],
             )
-            self._tasks[task_id] = record
-            self._by_context[context_id] = task_id
-            return record
+        record = TaskRecord(
+            task_id=task_id,
+            context_id=context_id,
+            message=message,
+            via=via,
+            owner=owner,
+        )
+        self._tasks[task_id] = record
+        self._by_context[context_id] = task_id
+        return record
 
-    async def unregister(self, task_id: str) -> None:
+    def unregister(self, task_id: str) -> None:
         """Remove a task from the registry. Idempotent."""
-        async with self._lock:
-            record = self._tasks.pop(task_id, None)
-            if record is not None:
-                self._by_context.pop(record.context_id, None)
+        record = self._tasks.pop(task_id, None)
+        if record is not None:
+            self._by_context.pop(record.context_id, None)
 
     def get(self, task_id: str) -> TaskRecord | None:
         """Return the record for ``task_id`` or ``None`` if unknown."""
@@ -430,7 +435,9 @@ class TaskWorker:
                 _METRICS.tasks_completed.add(1)
             finally:
                 record.completion_event.set()
-                await self._registry.unregister(record.task_id)
+                # Synchronous — no await point, so even a re-delivered
+                # CancelledError during shutdown cannot interrupt cleanup.
+                self._registry.unregister(record.task_id)
 
     async def _run_inner(self) -> None:
         """The happy path: snapshot, complete, merge back.
@@ -649,7 +656,7 @@ class TaskEngine:
         task_id = task_id or str(uuid4())
 
         try:
-            record = await self._registry.register(
+            record = self._registry.register(
                 task_id=task_id,
                 context_id=ctx_id,
                 message=message,
