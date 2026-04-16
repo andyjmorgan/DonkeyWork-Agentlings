@@ -97,3 +97,56 @@ class TestDirectoryCreation:
         data_dir.mkdir()
         store = MemoryFileStore(data_dir)
         assert (data_dir / "memory").is_dir()
+
+
+class TestLoadCaching:
+    """``load()`` must avoid re-parsing when the file's mtime is unchanged."""
+
+    def test_repeated_load_does_not_reparse(
+        self, mem_store: MemoryFileStore
+    ) -> None:
+        from unittest.mock import patch
+
+        mem_store.save(MemoryStore())
+        mem_store.load()  # warm the cache
+
+        with patch("agentlings.core.memory_store.json.loads") as mocked:
+            mocked.return_value = {"entries": []}
+            for _ in range(5):
+                mem_store.load()
+            assert mocked.call_count == 0, (
+                "cached load must not re-invoke json.loads"
+            )
+
+    def test_save_invalidates_cache(self, mem_store: MemoryFileStore) -> None:
+        from agentlings.core.memory_models import MemoryEntry
+        from datetime import datetime, timezone
+
+        mem_store.save(MemoryStore())
+        mem_store.load()
+
+        mem_store.save(MemoryStore(entries=[
+            MemoryEntry(key="k", value="v", recorded=datetime.now(timezone.utc)),
+        ]))
+        loaded = mem_store.load()
+        assert len(loaded.entries) == 1
+        assert loaded.entries[0].key == "k"
+
+    def test_external_write_with_new_mtime_invalidates(
+        self, mem_store: MemoryFileStore, tmp_data_dir: Path
+    ) -> None:
+        import os
+
+        mem_store.save(MemoryStore())
+        mem_store.load()  # cache warm
+
+        # Overwrite with new content and bump mtime manually to simulate an
+        # external writer touching the file.
+        new_payload = '{"entries": [{"key": "x", "value": "y", "recorded": "2026-01-01T00:00:00+00:00"}]}'
+        mem_store.path.write_text(new_payload, encoding="utf-8")
+        now_ns = mem_store.path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(mem_store.path, ns=(now_ns, now_ns))
+
+        loaded = mem_store.load()
+        assert len(loaded.entries) == 1
+        assert loaded.entries[0].key == "x"

@@ -1,23 +1,51 @@
-"""Message loop — the single entrance point for all agent interactions."""
+"""Message loop — the single entrance point for all agent interactions.
+
+In v2, the loop is a thin backwards-compatible facade over ``TaskEngine``.
+Every call to ``process_message`` spawns a task, blocks until it reaches a
+terminal state, and returns the final response as a ``LoopResult``.
+
+Protocol adapters that want the full task surface (poll, cancel, slow-path
+yield) should call ``TaskEngine`` directly via the ``engine`` property.
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
 from agentlings.config import AgentConfig
-from agentlings.core.completion import CompletionResult, run_completion
 from agentlings.core.llm import BaseLLMClient
 from agentlings.core.memory_store import MemoryFileStore
-from agentlings.core.models import CompactionEntry, MessageEntry
-from agentlings.core.prompt import build_system_prompt
 from agentlings.core.store import JournalStore
-from agentlings.core.telemetry import otel_span
+from agentlings.core.task import (
+    TaskEngine,
+    TaskState,
+    TaskStatus,
+)
 from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# "Effectively unlimited" await for callers that expect synchronous semantics.
+# Real deployments rely on ``TaskEngine.spawn`` directly with the configured
+# ``AGENT_TASK_AWAIT_SECONDS`` cap.
+_SYNCHRONOUS_AWAIT_SECONDS = 3600.0
+
+
+class LoopError(RuntimeError):
+    """Raised when the synchronous message-loop facade cannot deliver a result.
+
+    Occurs when the underlying task failed or was cancelled. The ``state``
+    attribute carries the ``TaskState`` for callers that need to inspect.
+    """
+
+    def __init__(self, state: TaskState) -> None:
+        super().__init__(
+            f"task {state.task_id} ended with status {state.status.value}: {state.error or ''}"
+        )
+        self.state = state
 
 
 @dataclass
@@ -27,18 +55,21 @@ class LoopResult:
     Attributes:
         context_id: The conversation context identifier.
         content: Anthropic-format content blocks from the final LLM response.
+        task_id: The task identifier used to execute this message (v2).
     """
 
     context_id: str
     content: list[dict[str, Any]]
+    task_id: str | None = None
 
 
 class MessageLoop:
-    """Orchestrates the append-replay-complete-execute cycle.
+    """Synchronous facade over ``TaskEngine`` for legacy callers.
 
-    Both A2A and MCP protocol handlers feed into this single entrance.
-    The loop appends user input to the JSONL journal, replays the conversation,
-    calls the LLM via the shared completion cycle, and journals the results.
+    Attributes:
+        engine: The underlying task engine. Protocol adapters should prefer
+            its API (``spawn``, ``poll``, ``cancel``) when they need the
+            task-based surface.
     """
 
     def __init__(
@@ -51,9 +82,18 @@ class MessageLoop:
     ) -> None:
         self._config = config
         self._store = store
-        self._llm = llm
-        self._tools = tools
-        self._memory_store = memory_store
+        self._engine = TaskEngine(
+            config=config,
+            store=store,
+            llm=llm,
+            tools=tools,
+            memory_store=memory_store,
+        )
+
+    @property
+    def engine(self) -> TaskEngine:
+        """The underlying task engine."""
+        return self._engine
 
     async def process_message(
         self,
@@ -64,104 +104,31 @@ class MessageLoop:
     ) -> LoopResult:
         """Process a user message and return the agent's response.
 
-        Creates a new context if none is provided, or continues an existing one.
-        Delegates LLM interaction to ``run_completion`` and journals every turn.
+        Backward-compatible synchronous API. Internally spawns a task and
+        waits for it to reach a terminal state.
 
         Args:
             text: The user's message text.
-            context_id: Existing context ID to continue, or ``None`` for a new conversation.
-            stream: Whether to use streaming (not yet implemented).
+            context_id: Existing context ID to continue, or ``None`` for a new one.
+            stream: Legacy flag; currently ignored.
             via: Protocol that originated the request (``"a2a"`` or ``"mcp"``).
 
         Returns:
-            The context ID and the final response content blocks.
+            The context ID, the final response content blocks, and the task ID.
+
+        Raises:
+            LoopError: If the underlying task failed or was cancelled.
         """
-        if context_id is None:
-            context_id = str(uuid4())
-            self._store.create(context_id)
-            logger.info("new context: %s via=%s", context_id, via)
-        elif not self._store.exists(context_id):
-            self._store.create(context_id)
-            logger.info("new context (external id): %s via=%s", context_id, via)
-        else:
-            logger.info("continuing context: %s via=%s", context_id, via)
-
-        with otel_span("agentling.loop.process_message", {
-            "agent.name": self._config.agent_name,
-            "loop.context_id": context_id,
-            "loop.via": via,
-        }) as span:
-            self._store.append(
-                context_id,
-                MessageEntry(
-                    ctx=context_id,
-                    role="user",
-                    content=[{"type": "text", "text": text}],
-                    via=via,
-                ),
-            )
-
-            memory = self._memory_store.load() if self._memory_store else None
-            memory_config = self._config.definition.memory
-            system = build_system_prompt(
-                config=self._config,
-                memory=memory,
-                data_dir=self._config.agent_data_dir,
-                injection_prompt=memory_config.injection_prompt if memory_config else None,
-                token_budget=memory_config.token_budget if memory_config else 2000,
-            )
-
-            messages = self._store.replay(context_id)
-            result = await run_completion(
-                llm=self._llm,
-                system=system,
-                messages=messages,
-                tools=self._tools,
-            )
-
-            self._journal_completion(context_id, result, via)
-
-            span.set_attribute("loop.turns", len(result.turns))
-            span.set_attribute("loop.stop_reason", result.stop_reason or "unknown")
-
-        return LoopResult(context_id=context_id, content=result.content)
-
-    def _journal_completion(
-        self,
-        context_id: str,
-        result: CompletionResult,
-        via: str,
-    ) -> None:
-        """Persist all turns from a completion cycle into the JSONL journal."""
-        for turn in result.turns:
-            self._store.append(
-                context_id,
-                MessageEntry(
-                    ctx=context_id,
-                    role="assistant",
-                    content=turn.response.content,
-                    via=via,
-                ),
-            )
-
-            if turn.tool_results:
-                self._store.append(
-                    context_id,
-                    MessageEntry(
-                        ctx=context_id,
-                        role="user",
-                        content=turn.tool_results,
-                        via=via,
-                    ),
-                )
-
-        for block in result.content:
-            if block.get("type") == "compaction":
-                self._store.append(
-                    context_id,
-                    CompactionEntry(
-                        ctx=context_id,
-                        content=block.get("content", ""),
-                    ),
-                )
-                logger.info("compaction marker stored for context %s", context_id)
+        state = await self._engine.spawn(
+            message=text,
+            context_id=context_id,
+            via=via,
+            await_seconds=_SYNCHRONOUS_AWAIT_SECONDS,
+        )
+        if state.status != TaskStatus.COMPLETED:
+            raise LoopError(state)
+        return LoopResult(
+            context_id=state.context_id,
+            content=state.content,
+            task_id=state.task_id,
+        )

@@ -86,17 +86,17 @@ class SleepCycle:
 
         with sleep_span("agentling.sleep", {"agent.name": self._config.agent_name, "sleep.date": date_str}) as root:
             with sleep_span("agentling.sleep.light_sleep", {"sleep.phase": "light_sleep", "sleep.date": date_str}) as ls:
-                conversations = self._light_sleep(date)
-                ls.set_attribute("sleep.conversations_found", len(conversations))
-                if not conversations:
+                context_ids = self._light_sleep(date)
+                ls.set_attribute("sleep.conversations_found", len(context_ids))
+                if not context_ids:
                     ls.set_attribute("sleep.skipped", True)
                     logger.info("[SLEEP:LIGHT] No conversations found, skipping cycle")
                     return
 
-            logger.info("[SLEEP:LIGHT] Found %d conversations, proceeding", len(conversations))
+            logger.info("[SLEEP:LIGHT] Found %d conversations, proceeding", len(context_ids))
 
             with sleep_span("agentling.sleep.deep_sleep", {"sleep.phase": "deep_sleep", "sleep.date": date_str}):
-                summaries, candidates = await self._deep_sleep(conversations, date_str)
+                summaries, candidates = await self._deep_sleep(context_ids, date_str)
 
             if summaries:
                 with sleep_span("agentling.sleep.rem", {"sleep.phase": "rem", "sleep.date": date_str}):
@@ -108,27 +108,33 @@ class SleepCycle:
         elapsed = time.monotonic() - start
         logger.info("[SLEEP] Cycle complete in %.1fs", elapsed)
 
-    def _light_sleep(self, date: datetime) -> list[Path]:
+    def _light_sleep(self, date: datetime) -> list[str]:
         """Phase 1: Discover conversations from the previous 24 hours.
 
-        Returns JSONL files that were modified since yesterday's midnight and
-        have been idle long enough to be safe to process.
+        Returns context IDs whose parent journal was modified since yesterday's
+        midnight and has been idle long enough to be safe to process. Supports
+        both the new per-context directory layout and legacy flat ``*.jsonl``
+        files; the store's ``iter_context_ids`` also migrates legacy files as a
+        side effect.
         """
         data_dir = self._config.agent_data_dir
         cutoff_start = date.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         grace_cutoff = datetime.now(timezone.utc) - timedelta(seconds=IDLE_GRACE_SECONDS)
 
-        conversations = []
-        for path in data_dir.glob("*.jsonl"):
+        context_ids: list[str] = []
+        for ctx_id in self._store.iter_context_ids():
+            path = self._store._path(ctx_id)  # noqa: SLF001 — internal path helper
+            if not path.exists():
+                continue
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-            if mtime >= cutoff_start and mtime <= grace_cutoff:
-                conversations.append(path)
+            if cutoff_start <= mtime <= grace_cutoff:
+                context_ids.append(ctx_id)
 
-        return conversations
+        return context_ids
 
     async def _deep_sleep(
         self,
-        conversations: list[Path],
+        context_ids: list[str],
         date_str: str,
     ) -> tuple[list[str], list[MemoryCandidate]]:
         """Phase 2: Replay conversations, submit batch summaries, write journal."""
@@ -140,8 +146,7 @@ class SleepCycle:
         summary_prompt = self._sleep_config.summary_prompt or DEFAULT_SUMMARY_PROMPT
 
         batch_requests: list[BatchRequest] = []
-        for path in conversations:
-            ctx_id = path.stem
+        for ctx_id in context_ids:
             messages_data = self._store.replay(ctx_id)
             if not messages_data:
                 continue
@@ -266,6 +271,8 @@ class SleepCycle:
 
     def _housekeeping(self, date: datetime) -> None:
         """Phase 4: Delete old conversation and journal files."""
+        import shutil
+
         data_dir = self._config.agent_data_dir
         journals_dir = data_dir / "journals"
 
@@ -275,6 +282,21 @@ class SleepCycle:
         conv_deleted = 0
         bytes_reclaimed = 0
 
+        # New layout: delete the whole context directory if idle past retention.
+        for ctx_id in self._store.iter_context_ids():
+            ctx_dir = self._store.context_dir(ctx_id)
+            parent = self._store._path(ctx_id)  # noqa: SLF001
+            if parent.exists():
+                mtime = datetime.fromtimestamp(parent.stat().st_mtime, tz=timezone.utc)
+                if mtime < conv_cutoff:
+                    size = sum(p.stat().st_size for p in ctx_dir.rglob("*") if p.is_file())
+                    if ctx_dir.exists():
+                        shutil.rmtree(ctx_dir)
+                    conv_deleted += 1
+                    bytes_reclaimed += size
+
+        # Legacy flat files that iter_context_ids may have missed because they
+        # were never migrated (e.g. context dir still absent).
         for path in data_dir.glob("*.jsonl"):
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
             if mtime < conv_cutoff:

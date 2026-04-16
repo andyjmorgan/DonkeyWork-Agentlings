@@ -39,3 +39,13 @@ packages = ["src/agentlings"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Silence noisy transitive-dependency deprecations. These are issues in
+# FastAPI/uvicorn/websockets/MCP SDK internals, not our code, and appear on
+# every integration test run. Keep the filter scoped narrowly so our own
+# warnings still surface.
+filterwarnings = [
+    "ignore:'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated:DeprecationWarning",
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+    "ignore:Use `streamable_http_client` instead.:DeprecationWarning",
+]

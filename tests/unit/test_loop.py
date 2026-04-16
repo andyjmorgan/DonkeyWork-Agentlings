@@ -55,8 +55,29 @@ class TestProcessMessage:
         loop, store = loop_deps
         result = await loop.process_message("run bash echo test")
         assert result.context_id is not None
+        # v2: parent replay contains only the user/assistant pair; intermediate
+        # tool turns live in the sub-journal.
         messages = store.replay(result.context_id)
-        assert len(messages) >= 3
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+
+        # The task sub-journal captures the full execution trace, including the
+        # assistant turn that emitted the tool_use and the tool_result message.
+        from agentlings.core.store import TaskJournal
+        assert result.task_id is not None
+        tj = TaskJournal(store.task_path(result.context_id, result.task_id))
+        sub_entries = tj.read_entries()
+        tool_use_seen = any(
+            e["t"] == "msg"
+            and any(b.get("type") == "tool_use" for b in e.get("content", []))
+            for e in sub_entries
+        )
+        tool_result_seen = any(
+            e["t"] == "msg"
+            and any(b.get("type") == "tool_result" for b in e.get("content", []))
+            for e in sub_entries
+        )
+        assert tool_use_seen, "sub-journal should record the tool_use turn"
+        assert tool_result_seen, "sub-journal should record the tool_result turn"
 
     @pytest.mark.asyncio
     async def test_journal_records_conversation(self, loop_deps) -> None:
@@ -71,8 +92,12 @@ class TestProcessMessage:
     async def test_via_parameter_recorded(self, loop_deps) -> None:
         loop, store = loop_deps
         result = await loop.process_message("hello", via="mcp")
-        path = store._path(result.context_id)
         import json
-        lines = path.read_text().strip().splitlines()
-        first = json.loads(lines[0])
-        assert first["via"] == "mcp"
+        entries = store.read_entries(result.context_id)
+        # First non-audit entry should be the user message, carrying the via tag.
+        for entry in entries:
+            if entry["t"] == "msg":
+                assert entry["via"] == "mcp"
+                break
+        else:
+            pytest.fail("no message entry recorded")

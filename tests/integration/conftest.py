@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import socket
 import threading
@@ -15,6 +16,40 @@ from agentlings.config import AgentConfig
 from agentlings.server import _create_app
 from tests.integration.a2a_client import A2ATestClient
 from tests.integration.mcp_client import MCPTestClient
+
+
+# --------------------------------------------------------------------------- #
+# Noise suppression — these messages are framework-level teardown artifacts,
+# not test failures. Dropping them keeps the Docker CI output scannable.
+# --------------------------------------------------------------------------- #
+
+
+class _DropTeardownNoise(logging.Filter):
+    """Suppress specific framework teardown messages that clutter test output.
+
+    - ``Task was destroyed but it is pending!`` — asyncio GC warning from
+      ``sse_starlette._shutdown_watcher`` when the Starlette app is torn
+      down from a thread at the end of a test module. Not our code, not a
+      test failure.
+    - ``Queue is closed. Event will not be dequeued.`` — A2A event-queue
+      shutdown warning emitted after the executor already returned.
+    """
+
+    _PATTERNS = (
+        "Task was destroyed but it is pending",
+        "Queue is closed. Event will not be dequeued",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(p in message for p in self._PATTERNS)
+
+
+# Install once, at import time — fires before any pytest collection so even
+# teardown-phase messages from fixtures are filtered.
+_teardown_filter = _DropTeardownNoise()
+for _name in ("asyncio", "a2a.server.events.event_queue"):
+    logging.getLogger(_name).addFilter(_teardown_filter)
 
 
 def _free_port() -> int:

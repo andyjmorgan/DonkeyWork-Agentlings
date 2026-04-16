@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
@@ -11,6 +13,11 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 BATCH_MAX_REQUESTS = 100_000
+
+# Matches ``delay-<seconds>`` in mock user messages — used by integration
+# tests to produce genuinely slow responses without global configuration.
+# Example: ``"delay-5 please answer"`` sleeps 5 seconds before responding.
+_MOCK_DELAY_RE = re.compile(r"delay-(\d+(?:\.\d+)?)")
 
 
 @dataclass
@@ -304,6 +311,11 @@ class MockLLMClient(BaseLLMClient):
     Returns canned responses based on pattern matching:
     tool name in input triggers tool_use, tool results get text replies,
     everything else gets an echo response.
+
+    Integration tests can produce genuinely slow responses by embedding
+    ``delay-<seconds>`` in the user message (e.g. ``"delay-5 please
+    answer"``). The mock sleeps that many seconds before responding. The
+    delay is skipped on tool-result loops so multi-turn flows don't re-sleep.
     """
 
     def __init__(
@@ -326,6 +338,22 @@ class MockLLMClient(BaseLLMClient):
         self._call_count += 1
         last_message = messages[-1] if messages else {}
         last_text = _extract_text(last_message)
+
+        # Honour embedded ``delay-N`` markers, but only on fresh user/assistant
+        # turns — never on tool-result loops (those would re-trip the sleep
+        # every iteration of the completion loop).
+        content = last_message.get("content")
+        is_tool_result_turn = (
+            isinstance(content, list)
+            and any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+        )
+        if not is_tool_result_turn:
+            m = _MOCK_DELAY_RE.search(last_text)
+            if m:
+                await asyncio.sleep(float(m.group(1)))
 
         if last_message.get("role") == "tool":
             return LLMResponse(
