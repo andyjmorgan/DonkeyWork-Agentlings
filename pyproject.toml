@@ -9,12 +9,12 @@ description = "Lightweight A2A + MCP single-process agent framework"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.52",
-    "a2a-sdk>=0.3.25",
+    "a2a-sdk>=0.3.25,<1.0",
     "starlette>=0.46",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.11",
     "pydantic-settings>=2.9",
-    "mcp>=1.9",
+    "mcp>=1.9,<1.10",
     "python-dotenv>=1.1",
     "pyyaml>=6.0",
     "opentelemetry-api>=1.20",
@@ -27,7 +27,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",
-    "a2a-sdk>=0.3.25",
+    "a2a-sdk>=0.3.25,<1.0",
 ]
 
 [project.scripts]
@@ -39,3 +39,13 @@ packages = ["src/agentlings"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Silence noisy transitive-dependency deprecations. These are issues in
+# FastAPI/uvicorn/websockets/MCP SDK internals, not our code, and appear on
+# every integration test run. Keep the filter scoped narrowly so our own
+# warnings still surface.
+filterwarnings = [
+    "ignore:'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated:DeprecationWarning",
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+    "ignore:Use `streamable_http_client` instead.:DeprecationWarning",
+]

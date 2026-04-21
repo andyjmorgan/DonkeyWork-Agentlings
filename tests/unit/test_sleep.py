@@ -65,7 +65,7 @@ class TestLightSleep:
             content=[{"type": "text", "text": "hello"}],
         ))
 
-        path = tmp_data_dir / "test-ctx.jsonl"
+        path = tmp_data_dir / "test-ctx" / "journal.jsonl"
         yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
         import os
         os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
@@ -84,7 +84,7 @@ class TestDeepSleep:
             content=[{"type": "text", "text": "hello agent"}],
         ))
 
-        path = tmp_data_dir / "ctx-1.jsonl"
+        path = tmp_data_dir / "ctx-1" / "journal.jsonl"
         yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
         import os
         os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
@@ -120,7 +120,7 @@ class TestHousekeeping:
             content=[{"type": "text", "text": "recent"}],
         ))
         cycle._housekeeping(datetime.now(timezone.utc))
-        assert (tmp_data_dir / "recent-ctx.jsonl").exists()
+        assert (tmp_data_dir / "recent-ctx" / "journal.jsonl").exists()
 
     def test_deletes_old_journals(self, sleep_deps, tmp_data_dir: Path) -> None:
         cycle, _, _, _ = sleep_deps
@@ -151,7 +151,7 @@ class TestLightSleepTimeWindow:
             content=[{"type": "text", "text": "afternoon work"}],
         ))
 
-        path = tmp_data_dir / "afternoon-ctx.jsonl"
+        path = tmp_data_dir / "afternoon-ctx" / "journal.jsonl"
         yesterday_3pm = datetime(2026, 4, 2, 15, 0, tzinfo=timezone.utc)
         import os
         os.utime(path, (yesterday_3pm.timestamp(), yesterday_3pm.timestamp()))
@@ -168,7 +168,7 @@ class TestLightSleepTimeWindow:
             content=[{"type": "text", "text": "ancient history"}],
         ))
 
-        path = tmp_data_dir / "old-ctx.jsonl"
+        path = tmp_data_dir / "old-ctx" / "journal.jsonl"
         two_days_ago = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc)
         import os
         os.utime(path, (two_days_ago.timestamp(), two_days_ago.timestamp()))

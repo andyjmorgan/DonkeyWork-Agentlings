@@ -10,7 +10,6 @@ from typing import Any, AsyncIterator
 import uvicorn
 from a2a.server.apps.jsonrpc.starlette_app import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -29,6 +28,7 @@ from agentlings.core.store import JournalStore
 from agentlings.core.telemetry import init_telemetry
 from agentlings.log import setup_logging
 from agentlings.protocol.a2a import AgentlingExecutor
+from agentlings.protocol.a2a_task_store import EngineTaskStore
 from agentlings.protocol.agent_card import generate_agent_card
 from agentlings.protocol.mcp import create_mcp_server
 from agentlings.tools.memory import init_memory_tool
@@ -108,12 +108,19 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         config=config, store=store, llm=llm, tools=tools,
         memory_store=memory_store,
     )
+    # Startup crash recovery: reconcile orphaned task sub-journals and partial
+    # merge-backs before accepting new traffic.
+    try:
+        loop.engine.recover_on_startup()
+    except Exception:  # noqa: BLE001 — recovery is best-effort
+        logger.exception("crash recovery pass failed")
+
     agent_card = generate_agent_card(config)
 
-    executor = AgentlingExecutor(loop)
+    executor = AgentlingExecutor(loop, config)
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
-        task_store=InMemoryTaskStore(),
+        task_store=EngineTaskStore(loop.engine),
     )
 
     a2a_app = A2AStarletteApplication(
@@ -121,7 +128,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         http_handler=request_handler,
     )
 
-    mcp_server = create_mcp_server(loop=loop, agent_card=agent_card)
+    mcp_server = create_mcp_server(loop=loop, agent_card=agent_card, config=config)
     transport: StreamableHTTPServerTransport | None = None
 
     async def mcp_endpoint(request: Request) -> Response:
@@ -175,6 +182,13 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
             try:
                 yield
             finally:
+                # Drain live task workers before background services so
+                # merge-backs in flight complete against a valid store.
+                try:
+                    await loop.engine.shutdown()
+                except Exception:  # noqa: BLE001 — shutdown is best-effort
+                    logger.exception("task engine shutdown raised")
+
                 for t in background_tasks:
                     t.cancel()
                     try:

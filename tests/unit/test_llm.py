@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -121,3 +122,99 @@ class TestFactory:
 
         client = create_llm_client(backend="anthropic", api_key="sk-test")
         assert isinstance(client, AnthropicLLMClient)
+
+
+class TestMockLLMDelay:
+    """``delay-N`` markers in user messages produce genuine async sleeps."""
+
+    @pytest.mark.asyncio
+    async def test_delay_marker_sleeps_requested_seconds(self) -> None:
+        client = MockLLMClient()
+        start = time.monotonic()
+        response = await client.complete(
+            system=[],
+            messages=[
+                {"role": "user", "content": [{"type": "text", "text": "delay-1 hi"}]}
+            ],
+            tools=[],
+        )
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.9, f"expected ~1s delay, got {elapsed:.2f}s"
+        assert elapsed < 2.0, f"delay should be bounded, got {elapsed:.2f}s"
+        assert response.content[0]["type"] == "text"
+        assert response.stop_reason == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_fractional_delay_supported(self) -> None:
+        client = MockLLMClient()
+        start = time.monotonic()
+        await client.complete(
+            system=[],
+            messages=[
+                {"role": "user", "content": [{"type": "text", "text": "delay-0.5 hi"}]}
+            ],
+            tools=[],
+        )
+        elapsed = time.monotonic() - start
+        assert 0.4 <= elapsed < 1.5, f"expected ~0.5s delay, got {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_no_delay_without_marker(self) -> None:
+        client = MockLLMClient()
+        start = time.monotonic()
+        await client.complete(
+            system=[],
+            messages=[
+                {"role": "user", "content": [{"type": "text", "text": "hello there"}]}
+            ],
+            tools=[],
+        )
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1, f"no marker should mean no sleep, got {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_delay_skipped_on_tool_result_loop(self) -> None:
+        """Tool-result turns must not re-trip the sleep each iteration."""
+        client = MockLLMClient(tool_names=["shell"])
+        # Simulate a tool-result message that still has the delay marker
+        # somewhere in prior history text but the *last* message is a
+        # tool_result.
+        start = time.monotonic()
+        await client.complete(
+            system=[],
+            messages=[
+                {"role": "user", "content": [{"type": "text", "text": "delay-5 run shell"}]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "shell", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "delay-5 output"},
+                ]},
+            ],
+            tools=[],
+        )
+        elapsed = time.monotonic() - start
+        # The last turn is a tool_result — must NOT sleep regardless of text.
+        assert elapsed < 0.1, f"tool-result turn should skip delay, got {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_delay_cancellable(self) -> None:
+        """Awaiting a long delay is cooperative — task.cancel() wakes it."""
+        import asyncio
+
+        client = MockLLMClient()
+
+        async def _run() -> None:
+            await client.complete(
+                system=[],
+                messages=[
+                    {"role": "user", "content": [{"type": "text", "text": "delay-60 hi"}]}
+                ],
+                tools=[],
+            )
+
+        task = asyncio.create_task(_run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -68,22 +69,61 @@ class A2ATestClient:
         msg = _user_message(text, context_id)
         context_id_out = None
         response_text = ""
+        task_id_out = None
+        task_state = None
 
         async for event in client.send_message(msg):
             if isinstance(event, Message):
                 response_text = get_message_text(event)
                 context_id_out = event.context_id
+                # Message events carry the task_id when the executor sets it
+                # (fast path returns a Message for a completed task).
+                if getattr(event, "task_id", None):
+                    task_id_out = event.task_id
+                    task_state = "completed"
             elif isinstance(event, tuple):
                 task, update = event
-                if task and task.context_id:
-                    context_id_out = task.context_id
+                if task:
+                    if task.context_id:
+                        context_id_out = task.context_id
+                    task_id_out = task.id
+                    task_state = task.status.state.value if task.status else None
+                    # If the task is complete, pull the final message out of history.
+                    if task.status and task.status.state.value == "completed":
+                        for m in task.history or []:
+                            if m.role.value == "agent":
+                                response_text = get_message_text(m)
 
-        client.close()
+        close_fn = getattr(client, "close", None)
+        if close_fn is not None:
+            result = close_fn()
+            if asyncio.iscoroutine(result):
+                await result
         return A2AResponse(
             context_id=context_id_out,
             text=response_text,
-            raw=None,
+            raw={"task_id": task_id_out, "task_state": task_state},
         )
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        """Call A2A's ``tasks/get`` to fetch current task state."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid4()),
+            "method": "tasks/get",
+            "params": {"id": task_id},
+        }
+        return await self.send_raw(payload)
+
+    async def cancel_task(self, task_id: str) -> dict[str, Any]:
+        """Call A2A's ``tasks/cancel`` to cancel a task."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": str(uuid4()),
+            "method": "tasks/cancel",
+            "params": {"id": task_id},
+        }
+        return await self.send_raw(payload)
 
     async def send_raw(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient() as http:

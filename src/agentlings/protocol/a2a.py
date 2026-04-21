@@ -1,7 +1,18 @@
-"""A2A protocol executor that bridges incoming agent-to-agent requests into the message loop."""
+"""A2A protocol executor bridging incoming requests into the task engine.
+
+SendMessage spawns a task in the shared engine and awaits up to
+``AGENT_TASK_AWAIT_SECONDS``. If the task completes in the await window, the
+final response is returned as a plain agent ``Message``. Otherwise a native
+A2A ``Task`` object (``status.state == working``) is enqueued so the caller
+can poll via ``GetTask`` — those GetTask calls are routed back to our engine
+by ``EngineTaskStore`` so the SDK's answers always reflect live state.
+
+Cancellation (``CancelTask``) hits the engine's cancel path by task id.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 
 from a2a.server.agent_execution import AgentExecutor
@@ -9,42 +20,70 @@ from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
 from a2a.utils import new_agent_text_message
 
+from agentlings.config import AgentConfig
 from agentlings.core.loop import MessageLoop
+from agentlings.core.task import (
+    ContextBusyError,
+    TaskNotFoundError,
+    TaskState,
+    TaskStatus,
+)
+from agentlings.protocol.a2a_task_store import task_state_to_a2a_task
 
 logger = logging.getLogger(__name__)
 
 
 class AgentlingExecutor(AgentExecutor):
-    """Executes A2A requests by forwarding user input through the shared message loop."""
+    """Executes A2A requests by forwarding user input through the shared task engine."""
 
-    def __init__(self, loop: MessageLoop) -> None:
+    def __init__(self, loop: MessageLoop, config: AgentConfig) -> None:
         self._loop = loop
+        self._engine = loop.engine
+        self._await_seconds = float(config.agent_task_await_seconds)
 
     async def execute(
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
         """Process an incoming A2A request and enqueue the agent's response.
 
-        Args:
-            context: The A2A request context containing user input and context ID.
-            event_queue: Queue for sending response events back to the caller.
+        Enqueues either a ``Message`` (fast path, completed) or a native
+        ``Task`` object (slow path, still working) depending on whether the
+        task finished within the configured await window.
         """
         user_text = context.get_user_input()
         context_id = context.context_id
+        # The A2A SDK generates a task_id for every inbound SendMessage. We
+        # must use that same id inside the engine so GetTask lookups (routed
+        # through EngineTaskStore) and the Task object we enqueue all agree.
+        sdk_task_id = context.task_id
 
         logger.debug(
-            "execute called: context_id=%s, user_text=%s",
+            "a2a execute: context_id=%s task_id=%s text=%r",
             context_id,
-            user_text[:100] if user_text else "",
+            sdk_task_id,
+            (user_text or "")[:100],
         )
 
         try:
-            result = await self._loop.process_message(
-                text=user_text,
+            state = await self._engine.spawn(
+                message=user_text,
                 context_id=context_id,
                 via="a2a",
+                await_seconds=self._await_seconds,
+                task_id=sdk_task_id,
             )
-        except Exception:
+        except ContextBusyError as e:
+            # Surface as a plain agent message — there is no live Task on this
+            # context that the caller can latch onto (it's someone else's).
+            await event_queue.enqueue_event(
+                new_agent_text_message(
+                    _format_busy(e),
+                    context_id=context_id,
+                )
+            )
+            await event_queue.close()
+            return
+        except Exception:  # noqa: BLE001
             logger.exception("error processing A2A message")
             await event_queue.enqueue_event(
                 new_agent_text_message(
@@ -55,36 +94,87 @@ class AgentlingExecutor(AgentExecutor):
             await event_queue.close()
             return
 
-        response_text = _extract_text(result.content)
-        response_msg = new_agent_text_message(
-            response_text, context_id=result.context_id
-        )
+        if state.status == TaskStatus.COMPLETED:
+            # Fast path — return the final response text as a Message event.
+            response_text = _extract_text(state.content)
+            await event_queue.enqueue_event(
+                new_agent_text_message(
+                    response_text,
+                    context_id=state.context_id,
+                    task_id=state.task_id,
+                )
+            )
+        else:
+            # Slow path or terminal-with-error — enqueue a native A2A Task so
+            # the client's GetTask/CancelTask flows reach our engine.
+            a2a_task = task_state_to_a2a_task(state)
+            await event_queue.enqueue_event(a2a_task)
 
         logger.debug(
-            "returning response: context_id=%s, text=%s",
-            result.context_id,
-            response_text[:100] if response_text else "",
+            "a2a response: context_id=%s status=%s task_id=%s",
+            state.context_id, state.status.value, state.task_id,
         )
-
-        await event_queue.enqueue_event(response_msg)
         await event_queue.close()
 
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
-        """Handle cancellation requests. Currently unsupported.
+        """Handle A2A ``CancelTask`` by routing to the engine's cancel path.
 
-        Args:
-            context: The A2A request context.
-            event_queue: Queue for sending response events back to the caller.
+        ``RequestContext.task_id`` is populated from the inbound request,
+        which (for our clients) is the engine's task_id — the Task object
+        enqueued on the slow path carries that id directly.
         """
-        await event_queue.enqueue_event(
-            new_agent_text_message(
-                "Cancellation is not supported.",
-                context_id=context.context_id,
+        task_id = context.task_id
+        if not task_id:
+            await event_queue.enqueue_event(
+                new_agent_text_message(
+                    "CancelTask requires a task_id.",
+                    context_id=context.context_id,
+                )
             )
-        )
+            await event_queue.close()
+            return
+
+        try:
+            state = await self._engine.cancel(task_id=task_id)
+        except TaskNotFoundError:
+            await event_queue.enqueue_event(
+                new_agent_text_message(
+                    f"Task {task_id} not found.",
+                    context_id=context.context_id,
+                )
+            )
+            await event_queue.close()
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("cancel failed for task %s", task_id)
+            await event_queue.enqueue_event(
+                new_agent_text_message(
+                    "Internal error during cancel.",
+                    context_id=context.context_id,
+                )
+            )
+            await event_queue.close()
+            return
+
+        # Enqueue the updated Task so the SDK relays the cancelled state.
+        await event_queue.enqueue_event(task_state_to_a2a_task(state))
         await event_queue.close()
+
+
+def _format_busy(e: ContextBusyError) -> str:
+    envelope = {
+        "status": "busy",
+        "error": "context_busy",
+        "contextId": e.context_id,
+        "activeTaskId": e.active_task_id,
+        "message": (
+            f"Context {e.context_id} is busy with task {e.active_task_id}. "
+            "Retry shortly."
+        ),
+    }
+    return json.dumps(envelope)
 
 
 def _extract_text(content: list[dict]) -> str:
@@ -93,3 +183,17 @@ def _extract_text(content: list[dict]) -> str:
         if block.get("type") == "text":
             parts.append(block.get("text", ""))
     return "\n".join(parts)
+
+
+def _format_state(state: TaskState, await_seconds: float) -> str:
+    """Legacy helper kept for backwards compatibility in tests."""
+    if state.status == TaskStatus.COMPLETED:
+        return _extract_text(state.content)
+    envelope = {
+        "status": state.status.value,
+        "taskId": state.task_id,
+        "contextId": state.context_id,
+    }
+    if state.error:
+        envelope["error"] = state.error
+    return json.dumps(envelope)
