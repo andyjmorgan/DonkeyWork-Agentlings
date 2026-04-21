@@ -9,7 +9,7 @@ description = "Lightweight A2A + MCP single-process agent framework"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.52",
-    "a2a-sdk>=0.3.25",
+    "a2a-sdk>=0.3.25,<1.0",
     "starlette>=0.46",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.11",
@@ -27,7 +27,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",
-    "a2a-sdk>=0.3.25",
+    "a2a-sdk>=0.3.25,<1.0",
 ]
 
 [project.scripts]
