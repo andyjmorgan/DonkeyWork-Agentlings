@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import logging
 
+from a2a.helpers.proto_helpers import new_text_message
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
-from a2a.utils import new_agent_text_message
+from a2a.types import Message, Role
 
 from agentlings.config import AgentConfig
 from agentlings.core.loop import MessageLoop
@@ -31,6 +32,26 @@ from agentlings.core.task import (
 from agentlings.protocol.a2a_task_store import task_state_to_a2a_task
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_text_message(
+    text: str,
+    *,
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build an agent-role ``Message`` proto carrying a single text part.
+
+    Replaces the removed ``a2a.utils.new_agent_text_message`` helper. The
+    proto ``Message`` requires a ``message_id`` and has no field presence on
+    string fields, so empty-string defaults are used when ids are unset.
+    """
+    return new_text_message(
+        text,
+        context_id=context_id or "",
+        task_id=task_id or "",
+        role=Role.ROLE_AGENT,
+    )
 
 
 class AgentlingExecutor(AgentExecutor):
@@ -76,7 +97,7 @@ class AgentlingExecutor(AgentExecutor):
             # Surface as a plain agent message — there is no live Task on this
             # context that the caller can latch onto (it's someone else's).
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     _format_busy(e),
                     context_id=context_id,
                 )
@@ -86,7 +107,7 @@ class AgentlingExecutor(AgentExecutor):
         except Exception:  # noqa: BLE001
             logger.exception("error processing A2A message")
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     "Internal error processing request.",
                     context_id=context_id,
                 )
@@ -98,7 +119,7 @@ class AgentlingExecutor(AgentExecutor):
             # Fast path — return the final response text as a Message event.
             response_text = _extract_text(state.content)
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     response_text,
                     context_id=state.context_id,
                     task_id=state.task_id,
@@ -128,7 +149,7 @@ class AgentlingExecutor(AgentExecutor):
         task_id = context.task_id
         if not task_id:
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     "CancelTask requires a task_id.",
                     context_id=context.context_id,
                 )
@@ -140,7 +161,7 @@ class AgentlingExecutor(AgentExecutor):
             state = await self._engine.cancel(task_id=task_id)
         except TaskNotFoundError:
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     f"Task {task_id} not found.",
                     context_id=context.context_id,
                 )
@@ -150,7 +171,7 @@ class AgentlingExecutor(AgentExecutor):
         except Exception:  # noqa: BLE001
             logger.exception("cancel failed for task %s", task_id)
             await event_queue.enqueue_event(
-                new_agent_text_message(
+                _agent_text_message(
                     "Internal error during cancel.",
                     context_id=context.context_id,
                 )
