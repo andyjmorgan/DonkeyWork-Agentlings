@@ -61,3 +61,51 @@ class TestA2AAuth:
                 },
             )
         assert resp.status_code == 401
+
+
+class TestA2ALegacyV0_3Compat:
+    """Verify 0.3 JSON-RPC clients work against the 1.0 mount.
+
+    Exercises the ``enable_v0_3_compat=True`` flag on ``create_jsonrpc_routes``:
+    a client that hand-rolls the legacy 0.3 ``message/send`` method (with
+    0.3-shaped message parts) must still get back a well-formed 0.3 result.
+    """
+
+    @pytest.mark.asyncio
+    async def test_legacy_message_send_returns_0_3_shape(
+        self, server_url: str, api_key: str
+    ) -> None:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                f"{server_url}/a2a",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "legacy-1",
+                    "method": "message/send",
+                    "params": {
+                        "message": {
+                            "messageId": "legacy-msg-1",
+                            "role": "user",
+                            "parts": [{"kind": "text", "text": "hello"}],
+                        }
+                    },
+                },
+                headers={
+                    "X-API-Key": api_key,
+                    "Content-Type": "application/json",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # 0.3 response envelope — either a message or a task in ``result``.
+        assert "result" in body, body
+        result = body["result"]
+        # 0.3 parts carry ``kind: "text"`` with the text as a top-level field.
+        if result.get("kind") == "message":
+            parts = result.get("parts", [])
+            assert parts, "expected at least one part"
+            assert parts[0].get("kind") == "text"
+            assert parts[0].get("text")
+        else:
+            assert result.get("kind") == "task"
+            assert result.get("id")
