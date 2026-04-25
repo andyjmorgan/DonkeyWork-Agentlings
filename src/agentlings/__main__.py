@@ -100,6 +100,7 @@ def _sleep_command(args: list[str]) -> None:
         api_key=config.anthropic_api_key,
         model=config.agent_model,
         max_tokens=config.agent_max_tokens,
+        base_url=config.anthropic_base_url,
     )
 
     cycle = SleepCycle(

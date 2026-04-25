@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from a2a.client.client import ClientConfig
 from a2a.client.client_factory import ClientFactory
 from a2a.client.middleware import ClientCallContext, ClientCallInterceptor
 from a2a.types import AgentCard, Message, Part, Role, TextPart
@@ -54,17 +55,30 @@ def _user_message(text: str, context_id: str | None = None) -> Message:
 
 
 class A2ATestClient:
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        request_timeout: float | None = None,
+    ) -> None:
         self._base_url = base_url
         self._api_key = api_key
+        self._request_timeout = request_timeout
 
     async def send(
         self, text: str, context_id: str | None = None
     ) -> A2AResponse | A2AError:
-        client = await ClientFactory.connect(
-            agent=self._base_url,
-            interceptors=[_APIKeyInterceptor(self._api_key)],
-        )
+        connect_kwargs: dict[str, Any] = {
+            "agent": self._base_url,
+            "interceptors": [_APIKeyInterceptor(self._api_key)],
+        }
+        if self._request_timeout is not None:
+            httpx_client = httpx.AsyncClient(timeout=self._request_timeout)
+            connect_kwargs["client_config"] = ClientConfig(
+                streaming=False, httpx_client=httpx_client,
+            )
+            connect_kwargs["resolver_http_kwargs"] = {"timeout": self._request_timeout}
+        client = await ClientFactory.connect(**connect_kwargs)
 
         msg = _user_message(text, context_id)
         context_id_out = None

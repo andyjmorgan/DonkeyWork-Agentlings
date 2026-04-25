@@ -183,12 +183,29 @@ class BaseLLMClient(ABC):
 
 
 class AnthropicLLMClient(BaseLLMClient):
-    """LLM client backed by the Anthropic Messages API."""
+    """LLM client backed by the Anthropic Messages API.
 
-    def __init__(self, api_key: str, model: str, max_tokens: int) -> None:
+    Also works against any Anthropic-compatible endpoint by passing
+    ``base_url`` — for example Ollama's ``/v1/messages`` compatibility
+    layer at ``http://localhost:11434``. When pointed at such a backend,
+    set the model to one served by that backend (e.g. ``"qwen3-coder"``)
+    and disable features the backend doesn't implement (batches, the
+    sleep cycle, structured output) via configuration.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int,
+        base_url: str | None = None,
+    ) -> None:
         import anthropic
 
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        client_kwargs: dict[str, Any] = {"api_key": api_key or "unset"}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = anthropic.AsyncAnthropic(**client_kwargs)
         self._model = model
         self._max_tokens = max_tokens
 
@@ -430,15 +447,20 @@ def create_llm_client(
     model: str = "claude-sonnet-4-6",
     max_tokens: int = 4096,
     tool_names: list[str] | None = None,
+    base_url: str | None = None,
 ) -> BaseLLMClient:
     """Factory that returns the appropriate LLM client for the given backend.
 
     Args:
         backend: Either ``"anthropic"`` for the real API or ``"mock"`` for testing.
-        api_key: Anthropic API key (required for ``"anthropic"`` backend).
+        api_key: Anthropic API key. Required for the upstream Anthropic API,
+            optional when ``base_url`` points at a compatible backend (e.g.
+            Ollama) that does not validate the key.
         model: Model identifier to use for completions.
         max_tokens: Maximum tokens in the model response.
         tool_names: Tool names the mock backend should recognize.
+        base_url: Optional override for the Anthropic Messages endpoint.
+            When set, the client talks to that URL instead of api.anthropic.com.
 
     Returns:
         A configured LLM client instance.
@@ -447,8 +469,13 @@ def create_llm_client(
         logger.info("using mock LLM backend")
         return MockLLMClient(tool_names=tool_names)
 
-    logger.info("using Anthropic LLM backend (model=%s)", model)
-    return AnthropicLLMClient(api_key=api_key, model=model, max_tokens=max_tokens)
+    if base_url:
+        logger.info("using Anthropic-compatible LLM backend (model=%s, base_url=%s)", model, base_url)
+    else:
+        logger.info("using Anthropic LLM backend (model=%s)", model)
+    return AnthropicLLMClient(
+        api_key=api_key, model=model, max_tokens=max_tokens, base_url=base_url,
+    )
 
 
 def _extract_text(message: dict[str, Any]) -> str:

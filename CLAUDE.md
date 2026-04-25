@@ -69,7 +69,8 @@ docker run -e ANTHROPIC_API_KEY=... -e AGENT_API_KEY=... -v ./data:/data -p 8420
 ## Configuration
 
 All via environment variables (loaded from `.env` via python-dotenv):
-- `ANTHROPIC_API_KEY` (required)
+- `ANTHROPIC_API_KEY` (required when talking to api.anthropic.com; optional when `ANTHROPIC_BASE_URL` points at a backend that ignores it, e.g. Ollama)
+- `ANTHROPIC_BASE_URL` (optional) — override the Messages endpoint. Set to `http://localhost:11434` to talk to Ollama's Anthropic-compatible API; combine with `AGENT_MODEL` set to an Ollama-served model (e.g. `qwen3-coder`) and `sleep.enabled: false` in the agent YAML since Ollama doesn't implement the batches API
 - `AGENT_API_KEY` (required) — checked via `X-API-Key` header
 - `AGENT_MODEL` (default `claude-sonnet-4-6`)
 - `AGENT_MAX_TOKENS` (default `4096`)
