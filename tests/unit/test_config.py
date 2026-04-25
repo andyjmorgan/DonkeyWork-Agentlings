@@ -29,6 +29,21 @@ def test_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.agent_port == 8420
     assert config.agent_log_level == "INFO"
     assert config.agent_llm_backend == "anthropic"
+    assert config.anthropic_base_url is None
+
+
+def test_anthropic_base_url_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing at Ollama is via env, mirroring how operators actually set it."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.168.69.21:11434")
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        _env_file=None,
+    )
+    assert config.anthropic_base_url == "http://192.168.69.21:11434"
 
 
 def test_default_agent_identity(tmp_path: Path) -> None:
@@ -216,6 +231,7 @@ class TestMemoryConfig:
 class TestSleepConfig:
     def test_defaults(self) -> None:
         config = SleepConfig()
+        assert config.enabled is True
         assert config.schedule == "0 2 * * *"
         assert config.journal_retention_days == 30
         assert config.conversation_retention_days == 14
@@ -223,6 +239,28 @@ class TestSleepConfig:
         assert config.model is None
         assert config.summary_prompt is None
         assert config.consolidation_prompt is None
+
+    def test_disabled_flag_parses(self) -> None:
+        """Backends without the batches API (e.g. Ollama) flip this to false."""
+        config = SleepConfig(enabled=False)
+        assert config.enabled is False
+
+    def test_disabled_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "description: test\n"
+            "sleep:\n"
+            "  enabled: false\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.sleep_config is not None
+        assert config.sleep_config.enabled is False
 
 
 class TestTelemetryConfig:

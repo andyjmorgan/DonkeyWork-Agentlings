@@ -31,6 +31,9 @@ class SleepConfig(BaseModel):
     """Nightly sleep cycle configuration.
 
     Attributes:
+        enabled: When ``False``, the sleep cycle is not scheduled even if
+            the block is present. Set this for backends that lack the
+            Anthropic batches API (e.g. Ollama's compatibility layer).
         schedule: Cron expression for when to run (default 2am daily).
         journal_retention_days: How long to keep journal files.
         conversation_retention_days: How long to keep JSONL conversation files.
@@ -40,6 +43,7 @@ class SleepConfig(BaseModel):
         consolidation_prompt: Override for the REM consolidation prompt.
     """
 
+    enabled: bool = True
     schedule: str = "0 2 * * *"
     journal_retention_days: int = 30
     conversation_retention_days: int = 14
@@ -122,6 +126,7 @@ class AgentConfig(BaseSettings):
     )
 
     anthropic_api_key: str = ""
+    anthropic_base_url: str | None = None
     agent_api_key: str = ""
     agent_model: str = "claude-sonnet-4-6"
     agent_max_tokens: int = 4096

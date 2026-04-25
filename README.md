@@ -174,9 +174,10 @@ Secrets and runtime settings stay in env vars (or `.env` file):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AGENT_CONFIG` | — | Path to agent YAML definition |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key (required for real LLM) |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (required for api.anthropic.com; optional with `ANTHROPIC_BASE_URL` pointed at e.g. Ollama) |
+| `ANTHROPIC_BASE_URL` | — | Override the Messages endpoint. Use `http://localhost:11434` to target Ollama's Anthropic-compatible API |
 | `AGENT_API_KEY` | — | API key for authenticating clients |
-| `AGENT_MODEL` | `claude-sonnet-4-6` | Anthropic model ID |
+| `AGENT_MODEL` | `claude-sonnet-4-6` | Model ID — set to an Ollama model (e.g. `qwen3-coder`) when using `ANTHROPIC_BASE_URL` |
 | `AGENT_MAX_TOKENS` | `4096` | Max tokens per LLM response |
 | `AGENT_HOST` | `0.0.0.0` | Bind address |
 | `AGENT_PORT` | `8420` | Bind port |

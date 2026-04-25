@@ -85,16 +85,27 @@ _TASK_STATE_NAME = {
 
 
 class A2ATestClient:
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        request_timeout: float | None = None,
+    ) -> None:
         self._base_url = base_url
         self._api_key = api_key
+        self._request_timeout = request_timeout
 
     async def send(
         self, text: str, context_id: str | None = None
     ) -> A2AResponse | A2AError:
+        config_kwargs: dict[str, Any] = {"streaming": False}
+        if self._request_timeout is not None:
+            config_kwargs["httpx_client"] = httpx.AsyncClient(
+                timeout=self._request_timeout,
+            )
         client = await create_client(
             agent=self._base_url,
-            client_config=ClientConfig(streaming=False),
+            client_config=ClientConfig(**config_kwargs),
             interceptors=[_APIKeyInterceptor(self._api_key)],
         )
 

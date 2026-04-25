@@ -103,6 +103,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         model=config.agent_model,
         max_tokens=config.agent_max_tokens,
         tool_names=tools.tool_names(),
+        base_url=config.anthropic_base_url,
     )
 
     loop = MessageLoop(
@@ -136,10 +137,12 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         return Response()
 
     sleep_cycle: SleepCycle | None = None
-    if config.sleep_config and memory_store:
+    if config.sleep_config and config.sleep_config.enabled and memory_store:
         sleep_cycle = SleepCycle(
             config=config, llm=llm, memory_store=memory_store, store=store,
         )
+    elif config.sleep_config and not config.sleep_config.enabled:
+        logger.info("sleep cycle disabled by config (sleep.enabled=false)")
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:

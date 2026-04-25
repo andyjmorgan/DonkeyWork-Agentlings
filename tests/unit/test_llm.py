@@ -123,6 +123,38 @@ class TestFactory:
         client = create_llm_client(backend="anthropic", api_key="sk-test")
         assert isinstance(client, AnthropicLLMClient)
 
+    def test_anthropic_backend_with_base_url(self) -> None:
+        """``base_url`` reaches the underlying Anthropic SDK client.
+
+        This is the core wiring for Ollama compatibility — if it regresses,
+        every Ollama request silently goes back to api.anthropic.com.
+        """
+        from agentlings.core.llm import AnthropicLLMClient
+
+        client = create_llm_client(
+            backend="anthropic",
+            api_key="ollama",
+            model="qwen3:4b",
+            base_url="http://localhost:11434",
+        )
+        assert isinstance(client, AnthropicLLMClient)
+        assert str(client._client.base_url).rstrip("/") == "http://localhost:11434"
+
+    def test_anthropic_backend_empty_api_key_with_base_url(self) -> None:
+        """An empty api_key + base_url should fall back to a placeholder so
+        the Anthropic SDK doesn't refuse to construct. Backends that ignore
+        the header (Ollama) accept this happily.
+        """
+        from agentlings.core.llm import AnthropicLLMClient
+
+        client = AnthropicLLMClient(
+            api_key="",
+            model="qwen3:4b",
+            max_tokens=128,
+            base_url="http://localhost:11434",
+        )
+        assert client._client.api_key == "unset"
+
 
 class TestMockLLMDelay:
     """``delay-N`` markers in user messages produce genuine async sleeps."""

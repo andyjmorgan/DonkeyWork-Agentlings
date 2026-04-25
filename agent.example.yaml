@@ -25,6 +25,7 @@ memory:
   # injection_prompt: null  # override the memory injection template
 
 sleep:
+  enabled: true             # set false for backends without batches API (e.g. Ollama)
   schedule: "0 2 * * *"
   journal_retention_days: 30
   conversation_retention_days: 14
