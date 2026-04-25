@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import uvicorn
-from a2a.server.apps.jsonrpc.starlette_app import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes.agent_card_routes import create_agent_card_routes
+from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
 from mcp.server.streamable_http import StreamableHTTPServerTransport
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -122,11 +123,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=EngineTaskStore(loop.engine),
-    )
-
-    a2a_app = A2AStarletteApplication(
         agent_card=agent_card,
-        http_handler=request_handler,
     )
 
     mcp_server = create_mcp_server(loop=loop, agent_card=agent_card, config=config)
@@ -199,8 +196,24 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
                     except asyncio.CancelledError:
                         pass
 
+    jsonrpc_routes = create_jsonrpc_routes(
+        request_handler=request_handler,
+        rpc_url="/a2a",
+        enable_v0_3_compat=True,
+    )
+    agent_card_routes = create_agent_card_routes(agent_card=agent_card)
+    # The 0.3 well-known path is ``/.well-known/agent.json``; 1.0 uses
+    # ``/.well-known/agent-card.json``. Expose both so existing 0.3 clients
+    # continue to discover the card.
+    legacy_card_routes = create_agent_card_routes(
+        agent_card=agent_card, card_url="/.well-known/agent.json"
+    )
+
     routes = [
         Route("/mcp", mcp_endpoint, methods=["GET", "POST", "DELETE"]),
+        *jsonrpc_routes,
+        *agent_card_routes,
+        *legacy_card_routes,
     ]
 
     middleware = [
@@ -212,8 +225,6 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         middleware=middleware,
         lifespan=lifespan,
     )
-
-    a2a_app.add_routes_to_app(app, rpc_url="/a2a")
 
     return app
 

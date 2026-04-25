@@ -33,7 +33,10 @@ class TestAgentCard:
             resp = await client.get(f"{server_url}/.well-known/agent-card.json")
         card = resp.json()
         assert "apiKey" in card["securitySchemes"]
-        assert card["security"] == [{"apiKey": []}]
+        # 1.0 renames top-level ``security`` to ``securityRequirements``, with
+        # each entry's scheme map carrying a ``StringList`` value instead of
+        # a bare array. An empty list serializes to ``{}``.
+        assert card["securityRequirements"] == [{"schemes": {"apiKey": {}}}]
 
     @pytest.mark.asyncio
     async def test_legacy_path_still_works(self, server_url: str) -> None:

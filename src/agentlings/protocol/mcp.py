@@ -61,11 +61,13 @@ def create_mcp_server(
         name=agent_card.name,
         description=(
             f"{agent_card.description}\n\n"
-            "Sends a message to the agent (set `message`) or polls an existing "
-            "task (set `taskId`). The response's `structuredContent.status` is "
-            "either `completed` (final response in `message`) or `working` "
-            "(retry with `taskId` to poll). `message` and `taskId` are mutually "
-            "exclusive. `waitSeconds` applies only to polls and is capped at "
+            "Exactly one of `message` or `taskId` must be provided:\n"
+            "- `message`: start a new task (natural-language request).\n"
+            "- `taskId`: poll an existing task returned by a prior call "
+            "whose status was `working`.\n\n"
+            "The response's `structuredContent.status` is either `completed` "
+            "(final response in `message`) or `working` (retry with `taskId`). "
+            "`waitSeconds` applies only to polls and is capped at "
             f"{int(await_seconds)} seconds."
         ),
         inputSchema={
@@ -117,22 +119,7 @@ def create_mcp_server(
         message = arguments.get("message")
         task_id = arguments.get("taskId")
         context_id = arguments.get("contextId")
-
-        wait_seconds_raw = arguments.get("waitSeconds")
-        try:
-            wait_seconds = (
-                0.0 if wait_seconds_raw is None else float(wait_seconds_raw)
-            )
-        except (TypeError, ValueError):
-            return _error_payload(
-                "invalid_input",
-                "`waitSeconds` must be a non-negative number.",
-            )
-        if wait_seconds < 0:
-            return _error_payload(
-                "invalid_input",
-                "`waitSeconds` must be a non-negative number.",
-            )
+        wait_seconds = arguments.get("waitSeconds", 0.0)
 
         if (message is None or message == "") and not task_id:
             return _error_payload(

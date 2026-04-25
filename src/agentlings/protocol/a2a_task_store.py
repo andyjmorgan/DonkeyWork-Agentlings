@@ -18,13 +18,14 @@ from typing import Any
 from a2a.server.context import ServerCallContext
 from a2a.server.tasks.task_store import TaskStore
 from a2a.types import (
+    ListTasksRequest,
+    ListTasksResponse,
     Message,
     Part,
     Role,
     Task,
     TaskState as A2ATaskState,
     TaskStatus as A2ATaskStatus,
-    TextPart,
 )
 
 from agentlings.core.task import (
@@ -37,13 +38,12 @@ from agentlings.core.task import (
 logger = logging.getLogger(__name__)
 
 
-# Mapping from our internal task lifecycle states to the A2A wire enum.
-_STATE_MAP: dict[TaskStatus, A2ATaskState] = {
-    TaskStatus.WORKING: A2ATaskState.working,
-    TaskStatus.CANCELLING: A2ATaskState.working,
-    TaskStatus.COMPLETED: A2ATaskState.completed,
-    TaskStatus.FAILED: A2ATaskState.failed,
-    TaskStatus.CANCELLED: A2ATaskState.canceled,
+_STATE_MAP: dict[TaskStatus, int] = {
+    TaskStatus.WORKING: A2ATaskState.TASK_STATE_WORKING,
+    TaskStatus.CANCELLING: A2ATaskState.TASK_STATE_WORKING,
+    TaskStatus.COMPLETED: A2ATaskState.TASK_STATE_COMPLETED,
+    TaskStatus.FAILED: A2ATaskState.TASK_STATE_FAILED,
+    TaskStatus.CANCELLED: A2ATaskState.TASK_STATE_CANCELED,
 }
 
 
@@ -58,19 +58,21 @@ def task_state_to_a2a_task(state: TaskState) -> Task:
     if state.status == TaskStatus.COMPLETED and state.content:
         text = _extract_text(state.content)
         if text:
-            history.append(Message(
-                role=Role.agent,
-                parts=[Part(root=TextPart(text=text))],
-                context_id=state.context_id,
-                task_id=state.task_id,
-                message_id=f"{state.task_id}-final",
-            ))
+            history.append(
+                Message(
+                    role=Role.ROLE_AGENT,
+                    parts=[Part(text=text)],
+                    context_id=state.context_id,
+                    task_id=state.task_id,
+                    message_id=f"{state.task_id}-final",
+                )
+            )
 
-    status_message: Message | None = None
+    status_kwargs: dict[str, Any] = {"state": _STATE_MAP[state.status]}
     if state.error and state.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
-        status_message = Message(
-            role=Role.agent,
-            parts=[Part(root=TextPart(text=state.error))],
+        status_kwargs["message"] = Message(
+            role=Role.ROLE_AGENT,
+            parts=[Part(text=state.error)],
             context_id=state.context_id,
             task_id=state.task_id,
             message_id=f"{state.task_id}-status",
@@ -79,14 +81,8 @@ def task_state_to_a2a_task(state: TaskState) -> Task:
     return Task(
         id=state.task_id,
         context_id=state.context_id,
-        status=A2ATaskStatus(
-            state=_STATE_MAP[state.status],
-            message=status_message,
-        ),
+        status=A2ATaskStatus(**status_kwargs),
         history=history,
-        artifacts=[],
-        kind="task",
-        metadata=None,
     )
 
 
@@ -137,3 +133,18 @@ class EngineTaskStore(TaskStore):
     ) -> None:
         """No-op. Retention follows the engine's lifecycle, not SDK calls."""
         logger.debug("EngineTaskStore.delete ignored for task %s", task_id)
+
+    async def list(
+        self,
+        params: ListTasksRequest,
+        context: ServerCallContext | None = None,
+    ) -> ListTasksResponse:
+        """Return an empty listing — the engine doesn't expose a task index.
+
+        The SDK's ``ListTasks`` RPC is optional; agentling doesn't advertise
+        the capability, so callers shouldn't invoke this. We return an empty
+        response rather than raise so the handler stays well-behaved if a
+        request slips through.
+        """
+        logger.debug("EngineTaskStore.list returning empty response")
+        return ListTasksResponse()

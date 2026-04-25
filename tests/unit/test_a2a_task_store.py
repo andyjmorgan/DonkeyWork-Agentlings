@@ -31,7 +31,7 @@ class TestTaskStateTranslation:
         a2a_task = task_state_to_a2a_task(state)
         assert a2a_task.id == "t1"
         assert a2a_task.context_id == "c1"
-        assert a2a_task.status.state == A2ATaskState.completed
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_COMPLETED
 
     def test_completed_history_contains_final_response(self) -> None:
         state = TaskState(
@@ -43,9 +43,11 @@ class TestTaskStateTranslation:
         a2a_task = task_state_to_a2a_task(state)
         assert len(a2a_task.history) == 1
         msg = a2a_task.history[0]
-        assert msg.role.value == "agent"
-        # Part is wrapped in Part root.
-        assert msg.parts[0].root.text == "the final answer"
+        # Proto Role uses ROLE_AGENT; value 2 by the enum definition.
+        from a2a.types import Role
+        assert msg.role == Role.ROLE_AGENT
+        # Part carries text directly (no nested TextPart wrapper in 1.0).
+        assert msg.parts[0].text == "the final answer"
 
     def test_working_maps_to_working(self) -> None:
         state = TaskState(
@@ -54,8 +56,8 @@ class TestTaskStateTranslation:
             status=TaskStatus.WORKING,
         )
         a2a_task = task_state_to_a2a_task(state)
-        assert a2a_task.status.state == A2ATaskState.working
-        assert a2a_task.history == []
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_WORKING
+        assert list(a2a_task.history) == []
 
     def test_cancelling_maps_to_working(self) -> None:
         """CANCELLING is an internal state; clients see `working` until terminal."""
@@ -65,7 +67,7 @@ class TestTaskStateTranslation:
             status=TaskStatus.CANCELLING,
         )
         a2a_task = task_state_to_a2a_task(state)
-        assert a2a_task.status.state == A2ATaskState.working
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_WORKING
 
     def test_cancelled_maps_to_canceled(self) -> None:
         state = TaskState(
@@ -75,9 +77,9 @@ class TestTaskStateTranslation:
             error="user requested",
         )
         a2a_task = task_state_to_a2a_task(state)
-        assert a2a_task.status.state == A2ATaskState.canceled
-        assert a2a_task.status.message is not None
-        assert a2a_task.status.message.parts[0].root.text == "user requested"
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_CANCELED
+        assert a2a_task.status.HasField("message")
+        assert a2a_task.status.message.parts[0].text == "user requested"
 
     def test_failed_maps_to_failed(self) -> None:
         state = TaskState(
@@ -87,9 +89,9 @@ class TestTaskStateTranslation:
             error="boom",
         )
         a2a_task = task_state_to_a2a_task(state)
-        assert a2a_task.status.state == A2ATaskState.failed
-        assert a2a_task.status.message is not None
-        assert a2a_task.status.message.parts[0].root.text == "boom"
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_FAILED
+        assert a2a_task.status.HasField("message")
+        assert a2a_task.status.message.parts[0].text == "boom"
 
     def test_empty_content_produces_empty_history(self) -> None:
         state = TaskState(
@@ -99,7 +101,7 @@ class TestTaskStateTranslation:
             content=[],
         )
         a2a_task = task_state_to_a2a_task(state)
-        assert a2a_task.history == []
+        assert list(a2a_task.history) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +134,7 @@ class TestEngineTaskStore:
         a2a_task = await task_store.get(state.task_id)
         assert a2a_task is not None
         assert a2a_task.id == state.task_id
-        assert a2a_task.status.state == A2ATaskState.completed
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_COMPLETED
         assert len(a2a_task.history) == 1
 
     @pytest.mark.asyncio
@@ -157,7 +159,7 @@ class TestEngineTaskStore:
 
         a2a_task2 = await task_store.get(state.task_id)
         assert a2a_task2 is not None
-        assert a2a_task2.status.state == A2ATaskState.completed
+        assert a2a_task2.status.state == A2ATaskState.TASK_STATE_COMPLETED
 
     @pytest.mark.asyncio
     async def test_delete_is_noop(
@@ -175,7 +177,6 @@ class TestEngineTaskStore:
     ) -> None:
         """After cancel, GetTask must report the cancelled state."""
         from tests.unit.test_task import ControllableLLM
-        from a2a.types import TaskState as A2ATaskState
         from agentlings.core.llm import LLMResponse
 
         llm = ControllableLLM()
@@ -192,7 +193,7 @@ class TestEngineTaskStore:
         # Before cancel, store reports working.
         a2a_task = await task_store.get(state.task_id)
         assert a2a_task is not None
-        assert a2a_task.status.state == A2ATaskState.working
+        assert a2a_task.status.state == A2ATaskState.TASK_STATE_WORKING
 
         await engine.cancel(state.task_id)
         # Drain LLM so worker wakes at checkpoint.
@@ -207,4 +208,4 @@ class TestEngineTaskStore:
 
         a2a_task2 = await task_store.get(state.task_id)
         assert a2a_task2 is not None
-        assert a2a_task2.status.state == A2ATaskState.canceled
+        assert a2a_task2.status.state == A2ATaskState.TASK_STATE_CANCELED

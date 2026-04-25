@@ -5,9 +5,14 @@ from __future__ import annotations
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentInterface,
     AgentSkill,
     APIKeySecurityScheme,
+    SecurityRequirement,
+    SecurityScheme,
+    StringList,
 )
+from a2a.utils.constants import PROTOCOL_VERSION_1_0, TransportProtocol
 
 from agentlings.config import AgentConfig
 
@@ -35,7 +40,7 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
                 id=s.id,
                 name=s.name,
                 description=s.description,
-                tags=s.tags,
+                tags=list(s.tags),
             )
             for s in config.skills
         ]
@@ -52,18 +57,27 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
     return AgentCard(
         name=config.agent_name,
         description=config.agent_description,
-        url=url,
         version="0.1.0",
+        supported_interfaces=[
+            AgentInterface(
+                url=url,
+                protocol_binding=TransportProtocol.JSONRPC,
+                protocol_version=PROTOCOL_VERSION_1_0,
+            ),
+        ],
         skills=skills,
-        capabilities=AgentCapabilities(streaming=False, pushNotifications=False),
-        defaultInputModes=["text"],
-        defaultOutputModes=["text"],
-        securitySchemes={
-            "apiKey": APIKeySecurityScheme(
-                type="apiKey",
-                in_="header",
-                name="X-API-Key",
+        capabilities=AgentCapabilities(streaming=False, push_notifications=False),
+        default_input_modes=["text"],
+        default_output_modes=["text"],
+        security_schemes={
+            "apiKey": SecurityScheme(
+                api_key_security_scheme=APIKeySecurityScheme(
+                    location="header",
+                    name="X-API-Key",
+                )
             )
         },
-        security=[{"apiKey": []}],
+        security_requirements=[
+            SecurityRequirement(schemes={"apiKey": StringList(list=[])})
+        ],
     )
