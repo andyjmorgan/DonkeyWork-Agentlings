@@ -1,0 +1,14 @@
+name: {{NAME}}
+description: A lightweight AI agent
+
+tools: []
+
+skills: []
+
+memory:
+  token_budget: 2000
+  inject_into_prompt: true
+
+sleep:
+  enabled: true
+  schedule: "0 2 * * *"
