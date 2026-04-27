@@ -4,8 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentlings"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight A2A + MCP single-process agent framework"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Andrew Morgan", email = "dboyandy@gmail.com" },
+]
+keywords = ["a2a", "mcp", "agent", "anthropic", "claude", "agentling"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+]
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.52",
@@ -29,6 +44,11 @@ dev = [
     "httpx>=0.28",
     "a2a-sdk>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/andyjmorgan/DonkeyWork-Agentlings"
+Repository = "https://github.com/andyjmorgan/DonkeyWork-Agentlings"
+Issues = "https://github.com/andyjmorgan/DonkeyWork-Agentlings/issues"
 
 [project.scripts]
 agentling = "agentlings.__main__:main"

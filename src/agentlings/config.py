@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -21,10 +21,18 @@ class MemoryConfig(BaseModel):
         token_budget: Maximum tokens for the memory block injected into the system prompt.
         injection_prompt: Override template for the memory injection block.
             Receives ``{entries}`` placeholder. ``None`` uses the built-in default.
+        inject_into_prompt: When ``False``, the memory store is still active and
+            the ``memory_*`` tools are still callable, but no memory block is
+            stapled into the system prompt. The agent must read memory
+            explicitly via the tool. Useful for small/local models where the
+            prompt budget is precious.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     token_budget: int = 2000
     injection_prompt: str | None = None
+    inject_into_prompt: bool = True
 
 
 class SleepConfig(BaseModel):
@@ -42,6 +50,8 @@ class SleepConfig(BaseModel):
         summary_prompt: Override for the per-conversation summary prompt.
         consolidation_prompt: Override for the REM consolidation prompt.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
     schedule: str = "0 2 * * *"
@@ -63,6 +73,8 @@ class TelemetryConfig(BaseModel):
         service_name: Service name for spans and metrics.
         insecure: Disable TLS for the collector connection.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
     endpoint: str = "http://localhost:4318"
@@ -98,7 +110,14 @@ class AgentDefinition(BaseModel):
         skills: Skills to advertise in the Agent Card.
         system_prompt: The system prompt sent to the LLM.
         bash_timeout: Default timeout in seconds for bash tool commands.
+        data_dir_awareness: When ``True`` (default), append a system-prompt
+            block telling the agent where its data directory lives and how
+            to read journals and conversation logs. Set to ``False`` for
+            agents without filesystem tools or when the prompt budget is
+            tight (e.g. small local models).
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     name: str = "agentling"
     description: str = "A lightweight AI agent"
@@ -106,6 +125,7 @@ class AgentDefinition(BaseModel):
     skills: list[SkillConfig] = Field(default_factory=list)
     system_prompt: str | None = None
     bash_timeout: int = Field(ge=1, default=30)
+    data_dir_awareness: bool = True
     memory: MemoryConfig | None = None
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None
