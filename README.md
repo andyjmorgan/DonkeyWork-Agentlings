@@ -14,32 +14,76 @@
 
 Each agentling is a small, focused AI agent whose identity is defined by a YAML config file — name, description, system prompt, tools, and skills. The framework handles protocol compliance, conversation journaling, and context management. The LLM is the agent; the framework records and replays.
 
+## Install
+
+```bash
+pip install agentlings
+# or, isolated in a managed venv:
+uv tool install agentlings
+```
+
 ## Quick start
 
 ```bash
-pip install -e ".[dev]"
+# Scaffold a new agent in ./my-agent/
+agentling init my-agent
+cd my-agent
 
-# Create your agent definition
-cp agent.example.yaml agent.yaml
+# Add your Anthropic key (or leave blank to point at Ollama via ANTHROPIC_BASE_URL)
+$EDITOR .env
 
-# Run with mock LLM (no API key needed)
-AGENT_CONFIG=./agent.yaml AGENT_LLM_BACKEND=mock AGENT_API_KEY=dev agentling
-
-# Run with Anthropic
-AGENT_CONFIG=./agent.yaml ANTHROPIC_API_KEY=sk-ant-... AGENT_API_KEY=your-key agentling
-
-# See available tools
-agentling --list-tools
+# Run from the agent dir
+agentling run
 ```
 
-The agent serves:
+`agentling init` produces a self-contained directory:
+
+```
+my-agent/
+├── agent.yaml           # identity, system prompt, tools, sleep config
+├── .env                 # AGENT_API_KEY auto-generated; ANTHROPIC_API_KEY blank for you
+├── .env.example         # checked into source control as a template
+├── .framework-version   # the framework version that scaffolded this dir
+└── data/                # journals, memory, conversations
+    └── .migrations      # applied-migrations log
+```
+
+`agentling run` reads `agent.yaml`, `.env`, and `data/` from the current directory. To operate on a different dir without `cd`-ing in: `agentling run --dir /path/to/agent`.
+
+Bumping the framework version preserves your data — `pip install --upgrade agentlings && agentling upgrade` runs any pending data migrations against `data/` without touching `agent.yaml` or `.env`.
+
+The running agent serves:
 - `GET /.well-known/agent-card.json` — A2A Agent Card (public, no auth)
 - `POST /a2a` — A2A JSON-RPC endpoint
 - `POST /mcp` — MCP Streamable HTTP endpoint
 
+## CLI
+
+| Command | Purpose |
+|---|---|
+| `agentling init <name>` | Scaffold a new agent directory from a bundled template |
+| `agentling run [--dir]` | Run the agent server from CWD or the given directory |
+| `agentling upgrade [--dir]` | Apply pending data migrations after upgrading the framework |
+| `agentling memory show` | Print the long-term memory store for the agent in CWD |
+| `agentling sleep [--date]` | Run a one-off sleep cycle |
+| `agentling list-tools` | List available tools and groups |
+
 ## Running as a daemon
 
+The framework deliberately stays out of service-management — `agentling run` is just a long-running foreground process that reads `agent.yaml`, `.env`, and `data/` from its working directory. Wire it into whatever supervisor you already use.
+
 ### systemd (Linux)
+
+Set up the agent dir once:
+
+```bash
+sudo useradd -r -s /bin/false agentling
+sudo mkdir -p /opt/agentling && sudo chown agentling: /opt/agentling
+sudo -u agentling python3 -m venv /opt/agentling/venv
+sudo -u agentling /opt/agentling/venv/bin/pip install agentlings
+sudo -u agentling /opt/agentling/venv/bin/agentling init . --dir /opt/agentling --force
+sudo $EDITOR /opt/agentling/.env   # add ANTHROPIC_API_KEY
+```
 
 Create `/etc/systemd/system/agentling.service`:
 
@@ -52,8 +96,7 @@ After=network.target
 Type=simple
 User=agentling
 WorkingDirectory=/opt/agentling
-EnvironmentFile=/opt/agentling/.env
-ExecStart=/opt/agentling/venv/bin/agentling
+ExecStart=/opt/agentling/venv/bin/agentling run
 Restart=on-failure
 RestartSec=5
 
@@ -62,25 +105,16 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-# Set up
-sudo useradd -r -s /bin/false agentling
-sudo mkdir -p /opt/agentling
-sudo python3 -m venv /opt/agentling/venv
-sudo /opt/agentling/venv/bin/pip install agentlings
-
-# Copy your config
-sudo cp agent.yaml /opt/agentling/agent.yaml
-sudo cp .env /opt/agentling/.env    # ANTHROPIC_API_KEY, AGENT_API_KEY, AGENT_CONFIG=./agent.yaml
-
-# Start
 sudo systemctl daemon-reload
 sudo systemctl enable --now agentling
 sudo journalctl -u agentling -f
 ```
 
+To upgrade: `sudo -u agentling /opt/agentling/venv/bin/pip install --upgrade agentlings && sudo -u agentling /opt/agentling/venv/bin/agentling upgrade --dir /opt/agentling && sudo systemctl restart agentling`.
+
 ### launchd (macOS)
 
-Create `~/Library/LaunchAgents/com.donkeywork.agentling.plist`:
+Set up the agent dir once with `agentling init ~/.agentlings/my-agent`, then create `~/Library/LaunchAgents/com.donkeywork.agentling.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -92,18 +126,10 @@ Create `~/Library/LaunchAgents/com.donkeywork.agentling.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>/path/to/venv/bin/agentling</string>
+        <string>run</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/path/to/agentling</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>AGENT_CONFIG</key>
-        <string>./agent.yaml</string>
-        <key>ANTHROPIC_API_KEY</key>
-        <string>sk-ant-...</string>
-        <key>AGENT_API_KEY</key>
-        <string>your-key</string>
-    </dict>
+    <string>/Users/you/.agentlings/my-agent</string>
     <key>KeepAlive</key>
     <true/>
     <key>StandardErrorPath</key>
@@ -162,18 +188,32 @@ Tools are off by default. Run `agentling --list-tools` for details.
 
 ## Docker
 
+The simplest containerised setup uses the same `init` + `run` flow:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /agent
+RUN pip install agentlings
+RUN agentling init . --api-key dev
+VOLUME ["/agent/data"]
+EXPOSE 8420
+CMD ["agentling", "run"]
+```
+
 ```bash
 docker build -t agentling:latest .
-docker run -e AGENT_API_KEY=your-key -e AGENT_LLM_BACKEND=mock -p 8420:8420 agentling
+docker run -e ANTHROPIC_API_KEY=sk-ant-... -p 8420:8420 -v ./data:/agent/data agentling:latest
 ```
+
+For production, mount your own `agent.yaml` and `.env` over the scaffolded ones (or skip the `agentling init` build step entirely and bind-mount a host directory with everything pre-populated).
 
 ## Environment variables
 
-Secrets and runtime settings stay in env vars (or `.env` file):
+Secrets and runtime settings stay in env vars or, more commonly, the `.env` file inside the agent directory. `agentling init` creates an `.env` with `AGENT_API_KEY` already populated; everything else is opt-in.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_CONFIG` | — | Path to agent YAML definition |
+| `AGENT_CONFIG` | `./agent.yaml` (when present) | Path to agent YAML definition |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (required for api.anthropic.com; optional with `ANTHROPIC_BASE_URL` pointed at e.g. Ollama) |
 | `ANTHROPIC_BASE_URL` | — | Override the Messages endpoint. Use `http://localhost:11434` to target Ollama's Anthropic-compatible API |
 | `AGENT_API_KEY` | — | API key for authenticating clients |
