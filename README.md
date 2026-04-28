@@ -190,6 +190,10 @@ Tools are off by default. Run `agentling list-tools` for details.
 
 ## Custom tools
 
+<p align="center">
+  <img src="tools.png" alt="Custom tools" width="256">
+</p>
+
 Beyond the built-ins, you can author your own tools as plain typed Python functions. Decorate them with `@tool`, drop the file in a directory, and point `AGENT_TOOLS_DIR` at it — the agentling scans the directory at startup and registers every `Tool` it finds.
 
 ```python
