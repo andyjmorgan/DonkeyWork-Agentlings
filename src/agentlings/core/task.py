@@ -42,6 +42,7 @@ from agentlings.core.models import (
     TaskStarted,
 )
 from agentlings.core.prompt import build_system_prompt
+from agentlings.core.skills import SkillRef
 from agentlings.core.store import JournalStore, TaskJournal
 from agentlings.core.telemetry import get_meter, otel_span
 from agentlings.tools.registry import ToolRegistry
@@ -351,6 +352,7 @@ class TaskWorker:
         registry: TaskRegistry,
         context_lock: asyncio.Lock,
         memory_store: MemoryFileStore | None = None,
+        skills: list[SkillRef] | None = None,
     ) -> None:
         self._record = record
         self._config = config
@@ -361,6 +363,7 @@ class TaskWorker:
         self._registry = registry
         self._context_lock = context_lock
         self._memory_store = memory_store
+        self._skills = skills or []
 
     async def run(self) -> None:
         """Drive the task to a terminal state.
@@ -461,6 +464,7 @@ class TaskWorker:
             data_dir=self._config.agent_data_dir,
             injection_prompt=memory_config.injection_prompt if memory_config else None,
             token_budget=memory_config.token_budget if memory_config else 2000,
+            skills=self._skills,
         )
 
         async def _on_turn(turn: Any) -> None:
@@ -573,12 +577,14 @@ class TaskEngine:
         llm: BaseLLMClient,
         tools: ToolRegistry,
         memory_store: MemoryFileStore | None = None,
+        skills: list[SkillRef] | None = None,
     ) -> None:
         self._config = config
         self._store = store
         self._llm = llm
         self._tools = tools
         self._memory_store = memory_store
+        self._skills = skills or []
         self._registry = TaskRegistry()
         self._context_locks: dict[str, asyncio.Lock] = {}
         self._context_locks_guard = asyncio.Lock()
@@ -689,6 +695,7 @@ class TaskEngine:
             registry=self._registry,
             context_lock=ctx_lock,
             memory_store=self._memory_store,
+            skills=self._skills,
         )
         asyncio_task = asyncio.create_task(worker.run(), name=f"task:{task_id}")
         self._workers[task_id] = asyncio_task

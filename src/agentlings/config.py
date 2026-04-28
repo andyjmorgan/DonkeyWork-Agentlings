@@ -153,6 +153,7 @@ class AgentConfig(BaseSettings):
     agent_host: str = "0.0.0.0"
     agent_port: int = 8420
     agent_data_dir: Path = Path("./data")
+    agent_skills_dir: Path = Path("./skills")
     agent_log_level: str = "INFO"
     agent_llm_backend: Literal["anthropic", "mock"] = "anthropic"
     agent_external_url: str | None = None
@@ -202,6 +203,11 @@ class AgentConfig(BaseSettings):
     def skills(self) -> list[SkillConfig]:
         """Skills to advertise from the YAML definition."""
         return self._definition.skills
+
+    @property
+    def skills_dir(self) -> Path:
+        """Filesystem root for runtime instruction-skills (Open Skills spec)."""
+        return self.agent_skills_dir
 
     @property
     def memory_config(self) -> MemoryConfig | None:

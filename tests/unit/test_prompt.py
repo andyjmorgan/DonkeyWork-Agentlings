@@ -14,6 +14,7 @@ from pathlib import Path
 from agentlings.config import AgentConfig, AgentDefinition
 from agentlings.core.memory_models import MemoryEntry, MemoryStore
 from agentlings.core.prompt import build_system_prompt
+from agentlings.core.skills import SkillRef
 
 
 def _all_text(prompt: list[dict]) -> str:
@@ -139,7 +140,7 @@ class TestDataDirAwareness:
 
 
 class TestPromptBlockOrdering:
-    """Blocks appear in a consistent order: identity, memory, data dir."""
+    """Blocks appear in a consistent order: skills, identity, memory, data dir."""
 
     def test_full_ordering(self, test_config: AgentConfig, tmp_data_dir: Path) -> None:
         memory = MemoryStore(entries=[
@@ -168,3 +169,35 @@ class TestPromptBlockOrdering:
             assert block.get("cache_control") == {"type": "ephemeral"}, (
                 f"Block {i} missing cache_control"
             )
+
+
+class TestSkillsBlock:
+    """Discovered skills are prepended ahead of the identity block."""
+
+    def _ref(self, tmp_path: Path) -> SkillRef:
+        return SkillRef(
+            name="pdf-processing",
+            description="Extract text from PDFs.",
+            path=tmp_path / "skills" / "pdf-processing" / "SKILL.md",
+        )
+
+    def test_no_skills_no_block(self, test_config: AgentConfig) -> None:
+        prompt = build_system_prompt(test_config, skills=None)
+        assert "## Skills" not in prompt[0]["text"]
+
+    def test_empty_skills_no_block(self, test_config: AgentConfig) -> None:
+        prompt = build_system_prompt(test_config, skills=[])
+        assert "## Skills" not in prompt[0]["text"]
+
+    def test_skills_block_first(self, test_config: AgentConfig, tmp_path: Path) -> None:
+        prompt = build_system_prompt(test_config, skills=[self._ref(tmp_path)])
+        assert "## Skills" in prompt[0]["text"]
+        assert "progressive disclosure" in prompt[0]["text"].lower()
+        assert "pdf-processing" in prompt[0]["text"]
+        assert "You are a test agent." in prompt[1]["text"]
+
+    def test_skills_block_has_cache_control(
+        self, test_config: AgentConfig, tmp_path: Path
+    ) -> None:
+        prompt = build_system_prompt(test_config, skills=[self._ref(tmp_path)])
+        assert prompt[0]["cache_control"] == {"type": "ephemeral"}
