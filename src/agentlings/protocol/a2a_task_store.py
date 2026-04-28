@@ -18,6 +18,7 @@ from typing import Any
 from a2a.server.context import ServerCallContext
 from a2a.server.tasks.task_store import TaskStore
 from a2a.types import (
+    Artifact,
     ListTasksRequest,
     ListTasksResponse,
     Message,
@@ -50,11 +51,12 @@ _STATE_MAP: dict[TaskStatus, int] = {
 def task_state_to_a2a_task(state: TaskState) -> Task:
     """Render an engine ``TaskState`` as an A2A ``Task`` for the wire.
 
-    Completed tasks carry their final assistant message in ``history`` so
-    ``GetTask`` responses are self-contained — the client doesn't need a
-    separate call to retrieve the result.
+    Completed tasks carry their final assistant message in both ``artifacts``
+    (per the A2A spec, which says results SHOULD be returned via Artifacts)
+    and ``history`` (kept for backward compatibility with existing clients).
     """
     history: list[Message] = []
+    artifacts: list[Artifact] = []
     if state.status == TaskStatus.COMPLETED and state.content:
         text = _extract_text(state.content)
         if text:
@@ -65,6 +67,12 @@ def task_state_to_a2a_task(state: TaskState) -> Task:
                     context_id=state.context_id,
                     task_id=state.task_id,
                     message_id=f"{state.task_id}-final",
+                )
+            )
+            artifacts.append(
+                Artifact(
+                    artifact_id=f"{state.task_id}-result",
+                    parts=[Part(text=text)],
                 )
             )
 
@@ -82,6 +90,7 @@ def task_state_to_a2a_task(state: TaskState) -> Task:
         id=state.task_id,
         context_id=state.context_id,
         status=A2ATaskStatus(**status_kwargs),
+        artifacts=artifacts,
         history=history,
     )
 

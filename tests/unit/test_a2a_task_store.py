@@ -49,6 +49,22 @@ class TestTaskStateTranslation:
         # Part carries text directly (no nested TextPart wrapper in 1.0).
         assert msg.parts[0].text == "the final answer"
 
+    def test_completed_artifacts_contain_final_response(self) -> None:
+        """A2A spec: results SHOULD be returned via Artifacts on the Task."""
+        state = TaskState(
+            task_id="t1",
+            context_id="c1",
+            status=TaskStatus.COMPLETED,
+            content=[{"type": "text", "text": "the final answer"}],
+        )
+        a2a_task = task_state_to_a2a_task(state)
+        assert len(a2a_task.artifacts) == 1
+        artifact = a2a_task.artifacts[0]
+        assert artifact.artifact_id == "t1-result"
+        assert artifact.parts[0].text == "the final answer"
+        # History remains populated for backward compatibility.
+        assert len(a2a_task.history) == 1
+
     def test_working_maps_to_working(self) -> None:
         state = TaskState(
             task_id="t1",
