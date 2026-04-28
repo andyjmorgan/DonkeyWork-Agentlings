@@ -32,6 +32,7 @@ from agentlings.protocol.a2a import AgentlingExecutor
 from agentlings.protocol.a2a_task_store import EngineTaskStore
 from agentlings.protocol.agent_card import generate_agent_card
 from agentlings.protocol.mcp import create_mcp_server
+from agentlings.tools.loader import load_tools_from_directory
 from agentlings.tools.memory import init_memory_tool
 from agentlings.tools.registry import ToolRegistry
 
@@ -90,6 +91,9 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
 
     tools = ToolRegistry()
     tools.register_tools(config.enabled_tools, bash_timeout=config.definition.bash_timeout)
+
+    if config.agent_tools_dir is not None:
+        load_tools_from_directory(config.agent_tools_dir, tools)
 
     if not tools.tool_names():
         logger.warning(

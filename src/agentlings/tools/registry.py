@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from agentlings.tools.decorator import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,35 @@ class ToolRegistry:
             execute_fn=execute_fn,
         )
         logger.info("registered tool: %s", name)
+
+    def register_tool_object(self, tool: "Tool[Any]") -> None:
+        """Register a ``@tool``-decorated ``Tool`` instance.
+
+        Bridges the decorator surface to the existing registry shape: the
+        tool's input schema and metadata are extracted via
+        ``to_anthropic_dict()``; execution is wrapped so a unified
+        ``ToolResult`` is returned regardless of the underlying function's
+        return type.
+
+        Args:
+            tool: The ``Tool`` produced by the ``@tool`` decorator.
+        """
+        async def _execute(**kwargs: Any) -> ToolResult:
+            try:
+                output = await tool.call(kwargs)
+            except Exception as e:  # noqa: BLE001 — surface to LLM, not crash
+                return ToolResult(
+                    output=f"Tool {tool.name} failed: {e}",
+                    is_error=True,
+                )
+            return ToolResult(output=str(output), is_error=False)
+
+        self.register(
+            name=tool.name,
+            description=tool.description,
+            input_schema=tool.input_schema,
+            execute_fn=_execute,
+        )
 
     def list_schemas(self) -> list[dict[str, Any]]:
         """Return tool schemas in the format expected by the Anthropic API."""
