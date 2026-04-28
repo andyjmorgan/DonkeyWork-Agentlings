@@ -240,6 +240,53 @@ Untyped parameters, `*args`, `**kwargs`, and positional-only parameters are reje
 
 Reference tools showcasing each pattern live in `agentlings.tools.examples` (`echo`, `http_get`, `set_severity`, `geocode`).
 
+## Skills
+
+<p align="center">
+  <img src="skills.png" alt="Skills" width="256">
+</p>
+
+Skills are bundled instructions the agent activates on demand. Each skill is a directory containing a `SKILL.md` whose YAML frontmatter (`name`, `description`) is loaded into the system prompt at startup; the body — and any sibling `scripts/`, `references/`, or `assets/` — stays on disk until the agent decides the task needs it. This is the **progressive disclosure** model from the [Open Skills specification](https://agentskills.io/specification): metadata is cheap, instructions are loaded on activation, resources are loaded on demand.
+
+```
+skills/
+├── pdf-processing/
+│   ├── SKILL.md
+│   ├── scripts/extract.py
+│   └── references/FORMS.md
+└── data-analysis/
+    └── SKILL.md
+```
+
+A minimal `SKILL.md`:
+
+```markdown
+---
+name: pdf-processing
+description: Extract text and tables from PDFs, fill PDF forms, merge files. Use when the user mentions PDFs, forms, or document extraction.
+---
+
+Step-by-step instructions for the agent go below the frontmatter.
+Reference companion files with relative paths, e.g. `scripts/extract.py`.
+```
+
+Drop skill directories under `./skills` (or anywhere — point `AGENT_SKILLS_DIR` at it). On startup the agentling discovers them and prepends a single block to the system prompt explaining progressive disclosure and listing each skill's name, absolute path, and description. The agent reads `SKILL.md` itself when a task calls for the skill.
+
+### Frontmatter constraints
+
+Per the Open Skills spec:
+
+| Field | Required | Constraint |
+|---|---|---|
+| `name` | Yes | 1–64 chars, lowercase `a-z`, digits, hyphens; no leading/trailing/consecutive hyphens; must match the parent directory name |
+| `description` | Yes | 1–1024 chars, non-empty |
+
+Optional fields (`license`, `compatibility`, `metadata`, `allowed-tools`) are accepted but currently ignored at the runtime layer. Malformed skills (missing fields, invalid names, broken YAML) are logged at `WARNING` and skipped — one bad skill does not prevent the agent from booting.
+
+Discovery is strictly read-only — the agentling never writes to, deletes from, or modifies anything under `AGENT_SKILLS_DIR`. `agentling init` does not create the directory either; if you don't put one there, discovery is a no-op and no skills block is added to the prompt. The same applies to `AGENT_TOOLS_DIR`: scans are read-only and the user-tools directory is never added to `sys.path`, so a file named `json.py` cannot shadow the stdlib.
+
+> **Naming note:** the `skills:` array in `agent.yaml` is unrelated — those are A2A Agent Card capabilities advertised on the wire. Runtime skills (this section) live on disk under `AGENT_SKILLS_DIR`.
+
 ## Docker
 
 The simplest containerised setup uses the same `init` + `run` flow:
@@ -277,6 +324,7 @@ Secrets and runtime settings stay in env vars or, more commonly, the `.env` file
 | `AGENT_PORT` | `8420` | Bind port |
 | `AGENT_DATA_DIR` | `./data` | JSONL journal storage directory |
 | `AGENT_TOOLS_DIR` | — | Directory of `@tool`-decorated `.py` files to load at startup |
+| `AGENT_SKILLS_DIR` | `./skills` | Directory of Open Skills `SKILL.md` bundles to advertise to the agent |
 | `AGENT_TASK_AWAIT_SECONDS` | `60` | How long the HTTP handler blocks for task completion before returning a working task handle |
 | `AGENT_LOG_LEVEL` | `INFO` | Log level |
 | `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` or `mock` |

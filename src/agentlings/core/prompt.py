@@ -8,6 +8,7 @@ from typing import Any
 
 from agentlings.config import AgentConfig
 from agentlings.core.memory_models import MemoryStore
+from agentlings.core.skills import SkillRef, format_skills_block
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def build_system_prompt(
     data_dir: Path | None = None,
     injection_prompt: str | None = None,
     token_budget: int = 2000,
+    skills: list[SkillRef] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the system prompt blocks for the Anthropic Messages API.
 
@@ -49,6 +51,9 @@ def build_system_prompt(
         data_dir: Path to the agent's data directory for the awareness block.
         injection_prompt: Override for the memory injection template.
             Uses ``DEFAULT_MEMORY_INJECTION`` if not provided.
+        skills: Discovered runtime skills (Open Skills spec). Prepended ahead
+            of the identity block when non-empty so the agent sees them
+            before any operator-defined instructions.
 
     Returns:
         A list of text blocks with ``cache_control`` set to ephemeral.
@@ -58,13 +63,21 @@ def build_system_prompt(
     else:
         text = _default_prompt(config)
 
-    blocks = [
-        {
+    blocks: list[dict[str, Any]] = []
+
+    skills_block = format_skills_block(skills or [])
+    if skills_block is not None:
+        blocks.append({
             "type": "text",
-            "text": text,
+            "text": skills_block,
             "cache_control": {"type": "ephemeral"},
-        },
-    ]
+        })
+
+    blocks.append({
+        "type": "text",
+        "text": text,
+        "cache_control": {"type": "ephemeral"},
+    })
 
     if memory and memory.entries:
         template = injection_prompt or DEFAULT_MEMORY_INJECTION

@@ -17,6 +17,7 @@ from typing import Any
 from agentlings.config import AgentConfig
 from agentlings.core.llm import BaseLLMClient
 from agentlings.core.memory_store import MemoryFileStore
+from agentlings.core.skills import SkillRef
 from agentlings.core.store import JournalStore
 from agentlings.core.task import (
     TaskEngine,
@@ -79,6 +80,7 @@ class MessageLoop:
         llm: BaseLLMClient,
         tools: ToolRegistry,
         memory_store: MemoryFileStore | None = None,
+        skills: list[SkillRef] | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -88,6 +90,7 @@ class MessageLoop:
             llm=llm,
             tools=tools,
             memory_store=memory_store,
+            skills=skills,
         )
 
     @property

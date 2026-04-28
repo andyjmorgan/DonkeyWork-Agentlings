@@ -24,6 +24,7 @@ from agentlings.core.llm import create_llm_client
 from agentlings.core.loop import MessageLoop
 from agentlings.core.memory_store import MemoryFileStore
 from agentlings.core.scheduler import run_scheduler
+from agentlings.core.skills import discover_skills
 from agentlings.core.sleep import SleepCycle
 from agentlings.core.store import JournalStore
 from agentlings.core.telemetry import init_telemetry
@@ -110,9 +111,17 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         base_url=config.anthropic_base_url,
     )
 
+    skills = discover_skills(config.skills_dir)
+    if skills:
+        logger.info(
+            "loaded %d skill(s) from %s: %s",
+            len(skills), config.skills_dir, ", ".join(s.name for s in skills),
+        )
+
     loop = MessageLoop(
         config=config, store=store, llm=llm, tools=tools,
         memory_store=memory_store,
+        skills=skills,
     )
     # Startup crash recovery: reconcile orphaned task sub-journals and partial
     # merge-backs before accepting new traffic.
