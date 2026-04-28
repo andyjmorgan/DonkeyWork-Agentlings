@@ -162,6 +162,7 @@ class AgentConfig(BaseSettings):
     agent_otel_insecure: bool = True
     agent_otel_headers: str = ""
     agent_task_await_seconds: int = 60
+    agent_tools_dir: Path | None = None
 
     _definition: AgentDefinition = AgentDefinition()
 
