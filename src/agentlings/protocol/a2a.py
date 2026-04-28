@@ -7,6 +7,11 @@ A2A ``Task`` object (``status.state == working``) is enqueued so the caller
 can poll via ``GetTask`` — those GetTask calls are routed back to our engine
 by ``EngineTaskStore`` so the SDK's answers always reflect live state.
 
+Clients can opt out of the await window per-request by setting
+``configuration.return_immediately = true`` on ``message/send``; in that
+case the executor passes ``await_seconds=0`` to the engine and a ``Task``
+object is enqueued without blocking.
+
 Cancellation (``CancelTask``) hits the engine's cancel path by task id.
 """
 
@@ -78,10 +83,19 @@ class AgentlingExecutor(AgentExecutor):
         # through EngineTaskStore) and the Task object we enqueue all agree.
         sdk_task_id = context.task_id
 
+        # A2A 1.0: clients can opt out of blocking by setting
+        # ``configuration.return_immediately``. When set, skip the await
+        # window so a Task handle is enqueued immediately.
+        return_immediately = bool(
+            getattr(context.configuration, "return_immediately", False)
+        )
+        await_seconds = 0.0 if return_immediately else self._await_seconds
+
         logger.debug(
-            "a2a execute: context_id=%s task_id=%s text=%r",
+            "a2a execute: context_id=%s task_id=%s return_immediately=%s text=%r",
             context_id,
             sdk_task_id,
+            return_immediately,
             (user_text or "")[:100],
         )
 
@@ -90,7 +104,7 @@ class AgentlingExecutor(AgentExecutor):
                 message=user_text,
                 context_id=context_id,
                 via="a2a",
-                await_seconds=self._await_seconds,
+                await_seconds=await_seconds,
                 task_id=sdk_task_id,
             )
         except ContextBusyError as e:
