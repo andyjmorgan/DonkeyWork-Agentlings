@@ -57,6 +57,8 @@ The running agent serves:
 - `POST /a2a` — A2A JSON-RPC endpoint
 - `POST /mcp` — MCP Streamable HTTP endpoint
 
+Both protocols are task-aware. Each request becomes a task; the HTTP handler awaits up to `AGENT_TASK_AWAIT_SECONDS` (default 60) and either returns the final answer inline or yields a task handle the caller polls. A2A clients can opt out of the wait per-request via `configuration.return_immediately = true` on `message/send` (A2A v1.0 JSON name `returnImmediately`) — the handler then enqueues a `Task` object immediately and the caller polls via `tasks/get`.
+
 ## CLI
 
 | Command | Purpose |
@@ -184,7 +186,59 @@ Point to it with `AGENT_CONFIG=./agent.yaml`.
 | `filesystem` | `read_file`, `write_file`, `edit_file`, `list_directory`, `search_files` | File operations with offset/limit, find-and-replace, glob search |
 | `memory` | `memory_edit` | Read and write the agent's persistent long-term memory |
 
-Tools are off by default. Run `agentling --list-tools` for details.
+Tools are off by default. Run `agentling list-tools` for details.
+
+## Custom tools
+
+<p align="center">
+  <img src="tools.png" alt="Custom tools" width="256">
+</p>
+
+Beyond the built-ins, you can author your own tools as plain typed Python functions. Decorate them with `@tool`, drop the file in a directory, and point `AGENT_TOOLS_DIR` at it — the agentling scans the directory at startup and registers every `Tool` it finds.
+
+```python
+# tools/weather.py
+import os
+from typing import Annotated, Literal
+from pydantic import Field
+from agentlings.tools import tool
+
+
+@tool
+async def weather(
+    city: Annotated[str, Field(description="City name, e.g. 'Dublin'.")],
+    units: Literal["metric", "imperial"] = "metric",
+) -> str:
+    """Look up current weather for a city."""
+    api_key = os.environ["WEATHER_API_KEY"]
+    # ...fetch and return a string the LLM can read...
+```
+
+Then run with `AGENT_TOOLS_DIR=./tools agentling run`. No registration step, no schema dict — the JSON Schema the LLM sees is derived from the function signature via Pydantic.
+
+### How discovery works
+
+- The loader scans the top level of `AGENT_TOOLS_DIR` for `.py` files (no recursion).
+- Files whose name begins with `_` are skipped (use them for shared helpers).
+- Each file is imported in isolation — the directory is never added to `sys.path`, so a file named `json.py` cannot shadow the stdlib.
+- Every module-level `Tool` instance (i.e. anything you decorated with `@tool`) is registered.
+- An import or registration failure on one file is logged and the scan continues — one broken tool cannot brick the agent.
+
+### Authoring contract
+
+| Concept | How to express it |
+|---|---|
+| Tool name | `func.__name__` (or `@tool(name="...")`) |
+| Tool description | The function's docstring (or `@tool(description="...")`) |
+| Parameter description / constraints | `Annotated[T, Field(description="...", ge=..., le=...)]` |
+| Allowed values | `Literal["a", "b"]` or a `str`/`int` `Enum` |
+| Optional / defaults | A normal Python default (`x: int = 30`) |
+| Async I/O | `async def` — sync functions are fine too; both are awaited uniformly |
+| Per-tool secrets | Read your own env vars inside the function (the framework stays out of secret plumbing) |
+
+Untyped parameters, `*args`, `**kwargs`, and positional-only parameters are rejected at decoration time — `@tool` raises `ToolDefinitionError` so misuse fails loudly at startup, not in production.
+
+Reference tools showcasing each pattern live in `agentlings.tools.examples` (`echo`, `http_get`, `set_severity`, `geocode`).
 
 ## Docker
 
@@ -222,6 +276,8 @@ Secrets and runtime settings stay in env vars or, more commonly, the `.env` file
 | `AGENT_HOST` | `0.0.0.0` | Bind address |
 | `AGENT_PORT` | `8420` | Bind port |
 | `AGENT_DATA_DIR` | `./data` | JSONL journal storage directory |
+| `AGENT_TOOLS_DIR` | — | Directory of `@tool`-decorated `.py` files to load at startup |
+| `AGENT_TASK_AWAIT_SECONDS` | `60` | How long the HTTP handler blocks for task completion before returning a working task handle |
 | `AGENT_LOG_LEVEL` | `INFO` | Log level |
 | `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` or `mock` |
 | `AGENT_EXTERNAL_URL` | — | Public URL for Agent Card (needed in Docker/k8s) |
