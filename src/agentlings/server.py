@@ -111,7 +111,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         base_url=config.anthropic_base_url,
     )
 
-    skills = discover_skills(config.skills_dir)
+    skills = discover_skills(config.skills_dir) if config.skills_dir else []
     if skills:
         logger.info(
             "loaded %d skill(s) from %s: %s",

@@ -21,6 +21,23 @@ class TestScaffoldLayout:
         assert (agent_dir / ".framework-version").is_file()
         assert (agent_dir / "data").is_dir()
 
+    def test_creates_skills_and_tools_dirs(self, tmp_path: Path) -> None:
+        """Both folder-scan integrations get an empty drop-zone scaffolded.
+
+        Operators uncomment the matching env var in ``.env`` to enable
+        scanning. The directories are created empty so the convention is
+        self-documenting without auto-activating either integration.
+        """
+        result = init_agent("my-agent", dir=tmp_path / "my-agent")
+        assert (result.agent_dir / "skills").is_dir()
+        assert (result.agent_dir / "tools").is_dir()
+
+    def test_env_example_documents_folder_scan_vars(self, tmp_path: Path) -> None:
+        result = init_agent("my-agent", dir=tmp_path / "my-agent")
+        env_example = (result.agent_dir / ".env.example").read_text()
+        assert "AGENT_SKILLS_DIR=./skills" in env_example
+        assert "AGENT_TOOLS_DIR=./tools" in env_example
+
     def test_yaml_substitutes_name(self, tmp_path: Path) -> None:
         result = init_agent("my-agent", dir=tmp_path / "my-agent")
         text = (result.agent_dir / "agent.yaml").read_text(encoding="utf-8")
@@ -101,6 +118,18 @@ class TestIdempotency:
         (target / "data" / "important.txt").write_text("KEEP ME")
         init_agent("a", dir=target, force=True)
         assert (target / "data" / "important.txt").read_text() == "KEEP ME"
+
+    def test_force_preserves_skills_and_tools_content(self, tmp_path: Path) -> None:
+        """``--force`` re-scaffolds metadata files but never touches user content
+        the operator may have dropped under ``skills/`` or ``tools/``."""
+        target = tmp_path / "agent"
+        init_agent("a", dir=target)
+        (target / "skills" / "pdf-processing").mkdir()
+        (target / "skills" / "pdf-processing" / "SKILL.md").write_text("---\nname: pdf-processing\ndescription: pdfs\n---\n")
+        (target / "tools" / "weather.py").write_text("# user tool\n")
+        init_agent("a", dir=target, force=True)
+        assert (target / "skills" / "pdf-processing" / "SKILL.md").is_file()
+        assert (target / "tools" / "weather.py").read_text() == "# user tool\n"
 
     def test_force_preserves_existing_env(self, tmp_path: Path) -> None:
         """Re-running init must never clobber an operator's filled-in .env."""

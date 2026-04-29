@@ -59,6 +59,35 @@ def test_default_agent_identity(tmp_path: Path) -> None:
     assert config.system_prompt is None
 
 
+def test_skills_and_tools_dirs_opt_in_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both folder-scan env vars share opt-in semantics: unset means no scan."""
+    monkeypatch.delenv("AGENT_SKILLS_DIR", raising=False)
+    monkeypatch.delenv("AGENT_TOOLS_DIR", raising=False)
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path,
+        _env_file=None,
+    )
+    assert config.skills_dir is None
+    assert config.agent_tools_dir is None
+
+
+def test_skills_dir_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_SKILLS_DIR", str(tmp_path / "skills"))
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path,
+        _env_file=None,
+    )
+    assert config.skills_dir == tmp_path / "skills"
+
+
 def test_data_dir_created(tmp_path: Path) -> None:
     data_dir = tmp_path / "nested" / "data"
     assert not data_dir.exists()
