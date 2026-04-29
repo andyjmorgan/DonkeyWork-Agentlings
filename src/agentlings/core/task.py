@@ -44,7 +44,12 @@ from agentlings.core.models import (
 from agentlings.core.prompt import build_system_prompt
 from agentlings.core.skills import SkillRef
 from agentlings.core.store import JournalStore, TaskJournal
-from agentlings.core.telemetry import get_meter, otel_span
+from agentlings.core.telemetry import (
+    attach_context,
+    capture_context,
+    get_meter,
+    otel_span,
+)
 from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -353,6 +358,7 @@ class TaskWorker:
         context_lock: asyncio.Lock,
         memory_store: MemoryFileStore | None = None,
         skills: list[SkillRef] | None = None,
+        otel_parent_context: Any = None,
     ) -> None:
         self._record = record
         self._config = config
@@ -364,23 +370,34 @@ class TaskWorker:
         self._context_lock = context_lock
         self._memory_store = memory_store
         self._skills = skills or []
+        self._otel_parent_context = otel_parent_context
+        self._completion_result: CompletionResult | None = None
 
     async def run(self) -> None:
         """Drive the task to a terminal state.
 
         The worker writes exactly one terminal sub-journal entry before
         returning, regardless of success, failure, or cancellation.
+
+        The worker span is attached to the OTel context captured at
+        ``engine.spawn`` time so traces stitch through the
+        request-handler → engine → worker → completion → llm boundary.
         """
         record = self._record
-        with otel_span("agentling.task.worker", {
+        with attach_context(self._otel_parent_context), otel_span("agentling.task.worker", {
             "task.id": record.task_id,
             "task.context_id": record.context_id,
             "task.via": record.via,
         }) as span:
             try:
                 await self._run_inner()
-            except CancellationRequested:
+                span.set_attribute("task.terminal", "completed")
+                if self._completion_result is not None:
+                    self._stamp_tokens(span, self._completion_result.token_usage)
+            except CancellationRequested as cancelled:
                 span.set_attribute("task.terminal", "cancelled")
+                if cancelled.partial is not None:
+                    self._stamp_tokens(span, cancelled.partial.token_usage)
                 cancel = TaskCancelled(
                     ctx=record.context_id,
                     task_id=record.task_id,
@@ -498,6 +515,9 @@ class TaskWorker:
             turn_callback=_on_turn,
             should_cancel=lambda: record.cancel_flag,
         )
+        # Stash so ``run`` can stamp the cycle's token totals onto the
+        # worker span before exiting.
+        self._completion_result = result
 
         self._journal.append(TaskCompleted(
             ctx=record.context_id,
@@ -507,6 +527,14 @@ class TaskWorker:
 
         await self._merge_back(result)
         record.status = TaskStatus.COMPLETED
+
+    @staticmethod
+    def _stamp_tokens(span: Any, totals: dict[str, int]) -> None:
+        """Stamp token totals onto the worker span (cheap when telemetry off)."""
+        span.set_attribute("task.input_tokens", int(totals.get("input", 0)))
+        span.set_attribute("task.output_tokens", int(totals.get("output", 0)))
+        span.set_attribute("task.cache_creation_tokens", int(totals.get("cache_creation", 0)))
+        span.set_attribute("task.cache_read_tokens", int(totals.get("cache_read", 0)))
 
     async def _merge_back(self, result: CompletionResult) -> None:
         """Atomically propagate the task's outcome to the parent journal.
@@ -652,74 +680,89 @@ class TaskEngine:
             raise InvalidTaskInputError("message must not be empty")
 
         ctx_id = context_id or str(uuid4())
-        if not self._store.exists(ctx_id):
-            self._store.create(ctx_id)
-            logger.info(
-                "context created",
-                extra={"context_id": ctx_id, "via": via},
-            )
-
         task_id = task_id or str(uuid4())
 
-        try:
-            record = self._registry.register(
-                task_id=task_id,
-                context_id=ctx_id,
-                message=message,
-                via=via,
-                owner=owner,
-            )
-        except ContextBusyError:
-            _METRICS.context_busy_rejections.add(1)
-            raise
-
-        self._store.append(ctx_id, TaskDispatched(ctx=ctx_id, task_id=task_id))
-
-        task_journal = TaskJournal(self._store.task_path(ctx_id, task_id))
-        task_journal.create()
-        task_journal.append(TaskStarted(
-            ctx=ctx_id,
-            task_id=task_id,
-            message=message,
-            via=via,  # type: ignore[arg-type]
-        ))
-
-        ctx_lock = await self._lock_for(ctx_id)
-        worker = TaskWorker(
-            record=record,
-            config=self._config,
-            llm=self._llm,
-            tools=self._tools,
-            store=self._store,
-            task_journal=task_journal,
-            registry=self._registry,
-            context_lock=ctx_lock,
-            memory_store=self._memory_store,
-            skills=self._skills,
-        )
-        asyncio_task = asyncio.create_task(worker.run(), name=f"task:{task_id}")
-        self._workers[task_id] = asyncio_task
-        asyncio_task.add_done_callback(
-            lambda _t: self._on_worker_done(task_id, ctx_id)
-        )
-
-        _METRICS.tasks_spawned.add(1)
-        _METRICS.tasks_active.add(1)
-        logger.info(
-            "task spawned",
-            extra={"task_id": task_id, "context_id": ctx_id, "via": via},
-        )
-
-        try:
-            if await_seconds > 0:
-                await asyncio.wait_for(
-                    record.completion_event.wait(),
-                    timeout=await_seconds,
+        with otel_span("agentling.engine.spawn", {
+            "task.id": task_id,
+            "task.context_id": ctx_id,
+            "task.via": via,
+            "task.await_seconds": await_seconds,
+        }) as span:
+            if not self._store.exists(ctx_id):
+                self._store.create(ctx_id)
+                logger.info(
+                    "context created",
+                    extra={"context_id": ctx_id, "via": via},
                 )
-        except asyncio.TimeoutError:
-            pass
 
-        return self._state_from_task(task_id, ctx_id, record, task_journal)
+            try:
+                record = self._registry.register(
+                    task_id=task_id,
+                    context_id=ctx_id,
+                    message=message,
+                    via=via,
+                    owner=owner,
+                )
+            except ContextBusyError:
+                _METRICS.context_busy_rejections.add(1)
+                span.set_attribute("task.outcome", "context_busy")
+                raise
+
+            self._store.append(ctx_id, TaskDispatched(ctx=ctx_id, task_id=task_id))
+
+            task_journal = TaskJournal(self._store.task_path(ctx_id, task_id))
+            task_journal.create()
+            task_journal.append(TaskStarted(
+                ctx=ctx_id,
+                task_id=task_id,
+                message=message,
+                via=via,  # type: ignore[arg-type]
+            ))
+
+            ctx_lock = await self._lock_for(ctx_id)
+            # Capture the calling OTel context here so the worker — which
+            # runs in a fresh ``asyncio.create_task`` and would otherwise
+            # have no parent span — re-attaches it before opening its
+            # own span tree.
+            parent_ctx = capture_context()
+            worker = TaskWorker(
+                record=record,
+                config=self._config,
+                llm=self._llm,
+                tools=self._tools,
+                store=self._store,
+                task_journal=task_journal,
+                registry=self._registry,
+                context_lock=ctx_lock,
+                memory_store=self._memory_store,
+                skills=self._skills,
+                otel_parent_context=parent_ctx,
+            )
+            asyncio_task = asyncio.create_task(worker.run(), name=f"task:{task_id}")
+            self._workers[task_id] = asyncio_task
+            asyncio_task.add_done_callback(
+                lambda _t: self._on_worker_done(task_id, ctx_id)
+            )
+
+            _METRICS.tasks_spawned.add(1)
+            _METRICS.tasks_active.add(1)
+            logger.info(
+                "task spawned",
+                extra={"task_id": task_id, "context_id": ctx_id, "via": via},
+            )
+
+            try:
+                if await_seconds > 0:
+                    await asyncio.wait_for(
+                        record.completion_event.wait(),
+                        timeout=await_seconds,
+                    )
+            except asyncio.TimeoutError:
+                pass
+
+            state = self._state_from_task(task_id, ctx_id, record, task_journal)
+            span.set_attribute("task.status", state.status.value)
+            return state
 
     async def poll(
         self,
@@ -742,40 +785,47 @@ class TaskEngine:
             TaskNotFoundError: If no sub-journal and no registry entry exist.
             TaskContextMismatchError: If the assertion doesn't match.
         """
-        record = self._registry.get(task_id)
-        resolved_ctx = context_id or (record.context_id if record else None)
+        with otel_span("agentling.engine.poll", {
+            "task.id": task_id,
+            "task.context_id": context_id or "",
+            "task.wait_seconds": wait_seconds,
+        }) as span:
+            record = self._registry.get(task_id)
+            resolved_ctx = context_id or (record.context_id if record else None)
 
-        if resolved_ctx is None:
-            found = self._locate_task_context(task_id)
-            if found is None:
+            if resolved_ctx is None:
+                found = self._locate_task_context(task_id)
+                if found is None:
+                    raise TaskNotFoundError(
+                        task_id,
+                        searched="registry+filesystem",
+                    )
+                resolved_ctx = found
+
+            if context_id is not None and record is not None and context_id != record.context_id:
+                raise TaskContextMismatchError(task_id, context_id, record.context_id)
+
+            task_journal = TaskJournal(self._store.task_path(resolved_ctx, task_id))
+            if not task_journal.exists() and record is None:
                 raise TaskNotFoundError(
                     task_id,
-                    searched="registry+filesystem",
+                    searched=f"context={resolved_ctx}",
                 )
-            resolved_ctx = found
 
-        if context_id is not None and record is not None and context_id != record.context_id:
-            raise TaskContextMismatchError(task_id, context_id, record.context_id)
+            if wait_seconds > 0 and record is not None:
+                effective = min(wait_seconds, cap_seconds)
+                try:
+                    await asyncio.wait_for(
+                        record.completion_event.wait(),
+                        timeout=effective,
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
-        task_journal = TaskJournal(self._store.task_path(resolved_ctx, task_id))
-        if not task_journal.exists() and record is None:
-            raise TaskNotFoundError(
-                task_id,
-                searched=f"context={resolved_ctx}",
-            )
-
-        if wait_seconds > 0 and record is not None:
-            effective = min(wait_seconds, cap_seconds)
-            try:
-                await asyncio.wait_for(
-                    record.completion_event.wait(),
-                    timeout=effective,
-                )
-            except asyncio.TimeoutError:
-                pass
-
-        record = self._registry.get(task_id) or record
-        return self._state_from_task(task_id, resolved_ctx, record, task_journal)
+            record = self._registry.get(task_id) or record
+            state = self._state_from_task(task_id, resolved_ctx, record, task_journal)
+            span.set_attribute("task.status", state.status.value)
+            return state
 
     async def cancel(
         self,
@@ -788,28 +838,38 @@ class TaskEngine:
         If the task is active, flips the cancel flag (the worker observes it
         at its next checkpoint and writes the cancel markers).
         """
-        record = self._registry.get(task_id)
-        if record is None:
-            resolved_ctx = context_id or self._locate_task_context(task_id)
-            if resolved_ctx is None:
-                raise TaskNotFoundError(
-                    task_id,
-                    searched="registry+filesystem",
-                )
-            tj = TaskJournal(self._store.task_path(resolved_ctx, task_id))
-            if not tj.exists():
-                raise TaskNotFoundError(
-                    task_id,
-                    searched=f"context={resolved_ctx}",
-                )
-            return self._state_from_task(task_id, resolved_ctx, None, tj)
+        with otel_span("agentling.engine.cancel", {
+            "task.id": task_id,
+            "task.context_id": context_id or "",
+        }) as span:
+            record = self._registry.get(task_id)
+            if record is None:
+                resolved_ctx = context_id or self._locate_task_context(task_id)
+                if resolved_ctx is None:
+                    raise TaskNotFoundError(
+                        task_id,
+                        searched="registry+filesystem",
+                    )
+                tj = TaskJournal(self._store.task_path(resolved_ctx, task_id))
+                if not tj.exists():
+                    raise TaskNotFoundError(
+                        task_id,
+                        searched=f"context={resolved_ctx}",
+                    )
+                state = self._state_from_task(task_id, resolved_ctx, None, tj)
+                span.set_attribute("task.cancel_outcome", "already_terminal")
+                span.set_attribute("task.status", state.status.value)
+                return state
 
-        if context_id is not None and context_id != record.context_id:
-            raise TaskContextMismatchError(task_id, context_id, record.context_id)
+            if context_id is not None and context_id != record.context_id:
+                raise TaskContextMismatchError(task_id, context_id, record.context_id)
 
-        self._registry.request_cancel(task_id)
-        tj = TaskJournal(self._store.task_path(record.context_id, task_id))
-        return self._state_from_task(task_id, record.context_id, record, tj)
+            self._registry.request_cancel(task_id)
+            tj = TaskJournal(self._store.task_path(record.context_id, task_id))
+            state = self._state_from_task(task_id, record.context_id, record, tj)
+            span.set_attribute("task.cancel_outcome", "requested")
+            span.set_attribute("task.status", state.status.value)
+            return state
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -942,8 +1002,9 @@ class TaskEngine:
            unusual — sub-journal might have been purged). Close the wrapper
            with ``MergeCommitted`` alone, no conversational content.
         """
-        self._recover_orphaned_subjournals()
-        self._recover_incomplete_merges()
+        with otel_span("agentling.engine.recovery"):
+            self._recover_orphaned_subjournals()
+            self._recover_incomplete_merges()
 
     def _recover_orphaned_subjournals(self) -> None:
         for sub_path in self._store.data_dir.glob("*/tasks/*.jsonl"):

@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -26,6 +27,10 @@ from agentlings.core.models import (
     TaskCancelled,
     TaskDispatched,
     TaskFailed,
+)
+from agentlings.core.telemetry import (
+    record_journal_append,
+    record_journal_replay,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,7 +160,14 @@ class JournalStore:
         if not path.exists():
             raise ContextNotFoundError(ctx_id)
 
-        _append_jsonl(path, entry.model_dump_json() + "\n")
+        line = entry.model_dump_json() + "\n"
+        start = time.monotonic()
+        _append_jsonl(path, line)
+        record_journal_append(
+            target="parent",
+            byte_count=len(line.encode("utf-8")),
+            duration_seconds=time.monotonic() - start,
+        )
         logger.debug("appended %s entry to context %s", entry.t, ctx_id)
 
     def append_many(self, ctx_id: str, entries: Iterable[ParentJournalEntry]) -> None:
@@ -179,6 +191,8 @@ class JournalStore:
         lines = [e.model_dump_json() + "\n" for e in entries]
         if not lines:
             return
+        byte_count = sum(len(line.encode("utf-8")) for line in lines)
+        start = time.monotonic()
         with open(path, "a", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
@@ -186,6 +200,11 @@ class JournalStore:
                 f.flush()
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
+        record_journal_append(
+            target="parent",
+            byte_count=byte_count,
+            duration_seconds=time.monotonic() - start,
+        )
 
     def read_entries(self, ctx_id: str) -> list[dict[str, Any]]:
         """Return every parsed journal entry for a context in insertion order.
@@ -216,8 +235,14 @@ class JournalStore:
         Raises:
             ContextNotFoundError: If no journal file exists for the context.
         """
+        start = time.monotonic()
         parsed = self.read_entries(ctx_id)
         if not parsed:
+            record_journal_replay(
+                target="parent",
+                entry_count=0,
+                duration_seconds=time.monotonic() - start,
+            )
             return []
 
         cursor = 0
@@ -241,6 +266,11 @@ class JournalStore:
                     "role": entry["role"],
                     "content": entry["content"],
                 })
+        record_journal_replay(
+            target="parent",
+            entry_count=len(messages),
+            duration_seconds=time.monotonic() - start,
+        )
         return messages
 
     def iter_context_ids(self) -> list[str]:
@@ -289,7 +319,14 @@ class TaskJournal:
         """Append an entry (any Pydantic ``BaseModel`` with ``model_dump_json``)."""
         if not self._path.exists():
             self.create()
-        _append_jsonl(self._path, entry.model_dump_json() + "\n")
+        line = entry.model_dump_json() + "\n"
+        start = time.monotonic()
+        _append_jsonl(self._path, line)
+        record_journal_append(
+            target="sub",
+            byte_count=len(line.encode("utf-8")),
+            duration_seconds=time.monotonic() - start,
+        )
 
     def read_entries(self) -> list[dict[str, Any]]:
         """Return all parsed entries in insertion order."""

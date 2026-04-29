@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
+
+from agentlings.core.telemetry import otel_span, record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +30,17 @@ class LLMResponse:
     Attributes:
         content: List of content blocks (text, tool_use, etc.) from the model.
         stop_reason: Why the model stopped generating (e.g. ``"end_turn"``, ``"tool_use"``).
+        usage: Token-usage dict mirroring Anthropic's response shape —
+            ``input_tokens``, ``output_tokens``, ``cache_creation_input_tokens``,
+            ``cache_read_input_tokens``. Empty for backends that don't report usage.
+        model: The model identifier the call resolved to. Used as a telemetry
+            label so dashboards can slice by model.
     """
 
     content: list[dict[str, Any]]
     stop_reason: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
+    model: str = ""
 
 
 @dataclass
@@ -232,11 +242,37 @@ class AnthropicLLMClient(BaseLLMClient):
                 }
             }
 
-        response = await self._client.messages.create(**kwargs)
-        return LLMResponse(
-            content=[block.model_dump() for block in response.content],
-            stop_reason=response.stop_reason,
-        )
+        with otel_span("agentling.llm.complete", {
+            "llm.backend": "anthropic",
+            "llm.model": self._model,
+            "llm.max_tokens": self._max_tokens,
+            "llm.message_count": len(messages),
+            "llm.tool_count": len(tools or []),
+            "llm.has_output_schema": bool(output_schema),
+        }) as span:
+            start = time.monotonic()
+            response = await self._client.messages.create(**kwargs)
+            duration = time.monotonic() - start
+
+            usage = _extract_usage(response.usage)
+            usage_total = record_llm_usage(
+                usage,
+                model=self._model,
+                path="live",
+            )
+            span.set_attribute("llm.duration_seconds", round(duration, 4))
+            span.set_attribute("llm.stop_reason", response.stop_reason or "unknown")
+            span.set_attribute("llm.input_tokens", usage_total["input"])
+            span.set_attribute("llm.output_tokens", usage_total["output"])
+            span.set_attribute("llm.cache_creation_input_tokens", usage_total["cache_creation"])
+            span.set_attribute("llm.cache_read_input_tokens", usage_total["cache_read"])
+
+            return LLMResponse(
+                content=[block.model_dump() for block in response.content],
+                stop_reason=response.stop_reason,
+                usage=usage,
+                model=self._model,
+            )
 
     async def stream(
         self,
@@ -248,11 +284,17 @@ class AnthropicLLMClient(BaseLLMClient):
         yield  # pragma: no cover
 
     async def count_tokens(self, text: str) -> int:
-        result = await self._client.messages.count_tokens(
-            model=self._model,
-            messages=[{"role": "user", "content": text}],
-        )
-        return result.input_tokens
+        with otel_span("agentling.llm.count_tokens", {
+            "llm.backend": "anthropic",
+            "llm.model": self._model,
+            "llm.text_chars": len(text),
+        }) as span:
+            result = await self._client.messages.count_tokens(
+                model=self._model,
+                messages=[{"role": "user", "content": text}],
+            )
+            span.set_attribute("llm.input_tokens", int(result.input_tokens))
+            return result.input_tokens
 
     async def batch_create(self, requests: list[BatchRequest], model: str | None = None) -> list[str]:
         from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
@@ -261,64 +303,96 @@ class AnthropicLLMClient(BaseLLMClient):
         use_model = model or self._model
         batch_ids: list[str] = []
 
-        for i in range(0, len(requests), BATCH_MAX_REQUESTS):
-            chunk = requests[i : i + BATCH_MAX_REQUESTS]
-            api_requests = []
-            for req in chunk:
-                params: dict[str, Any] = {
-                    "model": use_model,
-                    "max_tokens": req.max_tokens,
-                    "system": req.system,
-                    "messages": req.messages,
-                }
-                if req.output_schema:
-                    params["output_config"] = {
-                        "format": {
-                            "type": "json_schema",
-                            "schema": req.output_schema,
-                        }
+        with otel_span("agentling.llm.batch_create", {
+            "llm.backend": "anthropic",
+            "llm.model": use_model,
+            "llm.batch.request_count": len(requests),
+        }) as span:
+            for i in range(0, len(requests), BATCH_MAX_REQUESTS):
+                chunk = requests[i : i + BATCH_MAX_REQUESTS]
+                api_requests = []
+                for req in chunk:
+                    params: dict[str, Any] = {
+                        "model": use_model,
+                        "max_tokens": req.max_tokens,
+                        "system": req.system,
+                        "messages": req.messages,
                     }
-                api_requests.append(
-                    Request(
-                        custom_id=req.custom_id,
-                        params=MessageCreateParamsNonStreaming(**params),
+                    if req.output_schema:
+                        params["output_config"] = {
+                            "format": {
+                                "type": "json_schema",
+                                "schema": req.output_schema,
+                            }
+                        }
+                    api_requests.append(
+                        Request(
+                            custom_id=req.custom_id,
+                            params=MessageCreateParamsNonStreaming(**params),
+                        )
                     )
-                )
 
-            result = await self._client.messages.batches.create(requests=api_requests)
-            batch_ids.append(result.id)
-            logger.info("batch submitted: %s (%d requests)", result.id, len(chunk))
+                result = await self._client.messages.batches.create(requests=api_requests)
+                batch_ids.append(result.id)
+                logger.info("batch submitted: %s (%d requests)", result.id, len(chunk))
+
+            span.set_attribute("llm.batch.chunk_count", len(batch_ids))
 
         return batch_ids
 
     async def batch_status(self, batch_id: str) -> BatchStatus:
-        result = await self._client.messages.batches.retrieve(batch_id)
-        counts = result.request_counts
-        return BatchStatus(
-            batch_id=result.id,
-            processing_status=result.processing_status,
-            succeeded=counts.succeeded,
-            failed=counts.errored + counts.expired,
-            total=counts.succeeded + counts.errored + counts.expired + counts.processing,
-        )
+        with otel_span("agentling.llm.batch_status", {
+            "llm.backend": "anthropic",
+            "llm.batch_id": batch_id,
+        }) as span:
+            result = await self._client.messages.batches.retrieve(batch_id)
+            counts = result.request_counts
+            span.set_attribute("llm.batch.processing_status", result.processing_status)
+            span.set_attribute("llm.batch.succeeded", counts.succeeded)
+            span.set_attribute(
+                "llm.batch.failed", counts.errored + counts.expired,
+            )
+            return BatchStatus(
+                batch_id=result.id,
+                processing_status=result.processing_status,
+                succeeded=counts.succeeded,
+                failed=counts.errored + counts.expired,
+                total=counts.succeeded + counts.errored + counts.expired + counts.processing,
+            )
 
     async def batch_results(self, batch_id: str) -> list[BatchItemResult]:
         items: list[BatchItemResult] = []
-        async for entry in await self._client.messages.batches.results(batch_id):
-            if entry.result.type == "succeeded":
-                content = [block.model_dump() for block in entry.result.message.content]
-                items.append(BatchItemResult(
-                    custom_id=entry.custom_id,
-                    content=content,
-                    status="succeeded",
-                ))
-            else:
-                error_msg = str(entry.result.error) if hasattr(entry.result, "error") else "unknown error"
-                items.append(BatchItemResult(
-                    custom_id=entry.custom_id,
-                    status="failed",
-                    error=error_msg,
-                ))
+        # Tests instantiate the client via __new__ to bypass __init__, so
+        # ``_model`` may be unset. Fall back rather than raise.
+        model = getattr(self, "_model", "unknown")
+        with otel_span("agentling.llm.batch_results", {
+            "llm.backend": "anthropic",
+            "llm.batch_id": batch_id,
+        }) as span:
+            succeeded = 0
+            failed = 0
+            async for entry in await self._client.messages.batches.results(batch_id):
+                if entry.result.type == "succeeded":
+                    msg = entry.result.message
+                    content = [block.model_dump() for block in msg.content]
+                    usage = _extract_usage(getattr(msg, "usage", None))
+                    record_llm_usage(usage, model=model, path="batch")
+                    items.append(BatchItemResult(
+                        custom_id=entry.custom_id,
+                        content=content,
+                        status="succeeded",
+                    ))
+                    succeeded += 1
+                else:
+                    error_msg = str(entry.result.error) if hasattr(entry.result, "error") else "unknown error"
+                    items.append(BatchItemResult(
+                        custom_id=entry.custom_id,
+                        status="failed",
+                        error=error_msg,
+                    ))
+                    failed += 1
+            span.set_attribute("llm.batch.succeeded", succeeded)
+            span.set_attribute("llm.batch.failed", failed)
         return items
 
 
@@ -334,6 +408,8 @@ class MockLLMClient(BaseLLMClient):
     answer"``). The mock sleeps that many seconds before responding. The
     delay is skipped on tool-result loops so multi-turn flows don't re-sleep.
     """
+
+    MOCK_MODEL = "mock-model"
 
     def __init__(
         self,
@@ -372,28 +448,48 @@ class MockLLMClient(BaseLLMClient):
             if m:
                 await asyncio.sleep(float(m.group(1)))
 
-        if last_message.get("role") == "tool":
-            return LLMResponse(
-                content=[{"type": "text", "text": f"Tool result received: {last_text}"}],
-                stop_reason="end_turn",
-            )
-
-        for tool_name in self._tool_names:
-            if tool_name in last_text:
-                return LLMResponse(
-                    content=[{
-                        "type": "tool_use",
-                        "id": f"toolu_{uuid4().hex[:12]}",
-                        "name": tool_name,
-                        "input": _build_mock_tool_input(tool_name, last_text),
-                    }],
-                    stop_reason="tool_use",
+        with otel_span("agentling.llm.complete", {
+            "llm.backend": "mock",
+            "llm.model": self.MOCK_MODEL,
+            "llm.message_count": len(messages),
+            "llm.tool_count": len(tools or []),
+        }) as span:
+            if last_message.get("role") == "tool":
+                response = LLMResponse(
+                    content=[{"type": "text", "text": f"Tool result received: {last_text}"}],
+                    stop_reason="end_turn",
+                    model=self.MOCK_MODEL,
                 )
+            else:
+                response = None
+                for tool_name in self._tool_names:
+                    if tool_name in last_text:
+                        response = LLMResponse(
+                            content=[{
+                                "type": "tool_use",
+                                "id": f"toolu_{uuid4().hex[:12]}",
+                                "name": tool_name,
+                                "input": _build_mock_tool_input(tool_name, last_text),
+                            }],
+                            stop_reason="tool_use",
+                            model=self.MOCK_MODEL,
+                        )
+                        break
 
-        return LLMResponse(
-            content=[{"type": "text", "text": f"Mock response to: {last_text}"}],
-            stop_reason="end_turn",
-        )
+                if response is None:
+                    response = LLMResponse(
+                        content=[{"type": "text", "text": f"Mock response to: {last_text}"}],
+                        stop_reason="end_turn",
+                        model=self.MOCK_MODEL,
+                    )
+
+            usage = _synthesize_mock_usage(messages, response.content)
+            response.usage = usage
+            usage_total = record_llm_usage(usage, model=self.MOCK_MODEL, path="live")
+            span.set_attribute("llm.stop_reason", response.stop_reason or "unknown")
+            span.set_attribute("llm.input_tokens", usage_total["input"])
+            span.set_attribute("llm.output_tokens", usage_total["output"])
+            return response
 
     async def stream(
         self,
@@ -433,9 +529,12 @@ class MockLLMClient(BaseLLMClient):
                 "summary": f"Summary of conversation: {text[:100]}",
                 "memory_candidates": [],
             }
+            response_content = [{"type": "text", "text": json.dumps(mock_output)}]
+            usage = _synthesize_mock_usage(req.messages, response_content)
+            record_llm_usage(usage, model=self.MOCK_MODEL, path="batch")
             results.append(BatchItemResult(
                 custom_id=req.custom_id,
-                content=[{"type": "text", "text": json.dumps(mock_output)}],
+                content=response_content,
                 status="succeeded",
             ))
         return results
@@ -476,6 +575,65 @@ def create_llm_client(
     return AnthropicLLMClient(
         api_key=api_key, model=model, max_tokens=max_tokens, base_url=base_url,
     )
+
+
+def _extract_usage(usage: Any) -> dict[str, int]:
+    """Normalise an Anthropic ``Usage`` object into a plain dict.
+
+    Anthropic-compatible backends (e.g. Ollama) may omit cache fields, so
+    treat every field as optional and default to zero.
+    """
+    if usage is None:
+        return {}
+    if isinstance(usage, dict):
+        src = usage
+    else:
+        src = {
+            k: getattr(usage, k, 0)
+            for k in (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            )
+        }
+    return {
+        "input_tokens": int(src.get("input_tokens", 0) or 0),
+        "output_tokens": int(src.get("output_tokens", 0) or 0),
+        "cache_creation_input_tokens": int(
+            src.get("cache_creation_input_tokens", 0) or 0
+        ),
+        "cache_read_input_tokens": int(
+            src.get("cache_read_input_tokens", 0) or 0
+        ),
+    }
+
+
+def _synthesize_mock_usage(
+    messages: list[dict[str, Any]],
+    response_content: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Approximate token counts for the mock backend.
+
+    Uses ``len(text) // 4`` — the same heuristic ``MockLLMClient.count_tokens``
+    has always used. This lets tests reason about non-zero token telemetry
+    without coupling them to a real LLM.
+    """
+    input_chars = 0
+    for msg in messages:
+        input_chars += len(_extract_text(msg))
+
+    output_chars = 0
+    for block in response_content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            output_chars += len(block.get("text", ""))
+
+    return {
+        "input_tokens": max(input_chars // 4, 1),
+        "output_tokens": max(output_chars // 4, 1),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
 
 
 def _extract_text(message: dict[str, Any]) -> str:

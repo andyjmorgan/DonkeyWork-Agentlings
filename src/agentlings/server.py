@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -27,7 +28,7 @@ from agentlings.core.scheduler import run_scheduler
 from agentlings.core.skills import discover_skills
 from agentlings.core.sleep import SleepCycle
 from agentlings.core.store import JournalStore
-from agentlings.core.telemetry import init_telemetry
+from agentlings.core.telemetry import init_telemetry, otel_span
 from agentlings.log import setup_logging
 from agentlings.protocol.a2a import AgentlingExecutor
 from agentlings.protocol.a2a_task_store import EngineTaskStore
@@ -70,6 +71,66 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
         return await call_next(request)
+
+
+class TelemetryMiddleware(BaseHTTPMiddleware):
+    """Wrap each non-public HTTP request in an ``agentling.http.request`` span.
+
+    Extracts a W3C ``traceparent`` header when present so callers' traces
+    stitch through into the engine spans below. When telemetry is disabled
+    the underlying span helper is a no-op, so this middleware has no
+    measurable cost.
+    """
+
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
+        # Skip discovery endpoints — they're hit on every Agent Card refresh
+        # and would generate large amounts of low-value span volume.
+        if request.url.path in _PUBLIC_PATHS:
+            return await call_next(request)
+
+        traceparent = request.headers.get("traceparent")
+        attributes: dict[str, Any] = {
+            "http.method": request.method,
+            "http.target": request.url.path,
+        }
+        if traceparent:
+            attributes["http.traceparent"] = traceparent
+
+        # Inject the inbound traceparent into the OTel context so child
+        # spans (engine.spawn, completion, etc.) become descendants of the
+        # caller's span. Best-effort: skipped when the OTel API is missing.
+        token = None
+        if traceparent:
+            try:
+                from opentelemetry import context as otel_context
+                from opentelemetry.propagators.textmap import default_getter
+                from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+                propagator = TraceContextTextMapPropagator()
+                ctx = propagator.extract(
+                    {"traceparent": traceparent},
+                    getter=default_getter,
+                )
+                token = otel_context.attach(ctx)
+            except Exception:  # noqa: BLE001 — propagation is best-effort
+                token = None
+
+        start = time.monotonic()
+        try:
+            with otel_span("agentling.http.request", attributes) as span:
+                response = await call_next(request)
+                span.set_attribute("http.status_code", response.status_code)
+                span.set_attribute(
+                    "http.duration_seconds",
+                    round(time.monotonic() - start, 4),
+                )
+                return response
+        finally:
+            if token is not None:
+                try:
+                    from opentelemetry import context as otel_context
+                    otel_context.detach(token)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 def _create_app(config: AgentConfig | None = None) -> Starlette:
@@ -230,6 +291,8 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
     ]
 
     middleware = [
+        # Telemetry runs outermost so it observes auth failures too.
+        Middleware(TelemetryMiddleware),
         Middleware(APIKeyMiddleware, api_key=config.agent_api_key),
     ]
 
