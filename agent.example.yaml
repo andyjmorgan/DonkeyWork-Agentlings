@@ -35,8 +35,14 @@ sleep:
   # consolidation_prompt: null  # override REM consolidation prompt
 
 telemetry:
+  # Off by default. When enabled, the agent emits OTLP traces + metrics
+  # for every HTTP request, protocol call, task, LLM call, tool, and
+  # journal write. See README "OpenTelemetry" for the full span/metric
+  # surface. Override at runtime via AGENT_OTEL_ENDPOINT (and friends).
   enabled: false
-  endpoint: "http://localhost:4318"
-  protocol: "http"
+  endpoint: "http://localhost:4318"   # OTLP collector base URL
+  protocol: "http"                    # "http" or "grpc"
   service_name: "agentling"
-  insecure: true
+  insecure: true                      # disable TLS for collector connection
+  # headers:
+  #   Authorization: "Bearer your-token"

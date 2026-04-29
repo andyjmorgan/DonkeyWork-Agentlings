@@ -457,7 +457,7 @@ The agent is told about this directory structure and can use its filesystem tool
 
 ## OpenTelemetry
 
-The sleep cycle and memory tool emit spans and metrics to an OpenTelemetry collector when telemetry is enabled.
+Off by default. When enabled, the framework emits a comprehensive trace + metric surface over OTLP — every HTTP request, every protocol call, every task, every LLM completion, every tool, and every journal write.
 
 ```yaml
 telemetry:
@@ -470,10 +470,70 @@ telemetry:
     Authorization: "Bearer your-token"
 ```
 
-Or via env vars: `AGENT_OTEL_ENDPOINT=http://collector:4318 AGENT_OTEL_HEADERS="Authorization=Bearer tok"`.
+Or via env vars (these override the YAML and force `enabled: true`):
 
+```bash
+AGENT_OTEL_ENDPOINT=http://collector:4318
+AGENT_OTEL_PROTOCOL=http      # or grpc
+AGENT_OTEL_INSECURE=true
+AGENT_OTEL_HEADERS="Authorization=Bearer tok,X-Tenant=team-a"
+```
 
-When telemetry is disabled (the default) or the OpenTelemetry packages are not installed, all instrumentation is a no-op.
+### Spans emitted
+
+A request flows top-to-bottom through this tree, parent → child:
+
+| Span | Where |
+|---|---|
+| `agentling.http.request` | Starlette middleware. Extracts inbound `traceparent` so external traces stitch in. |
+| `agentling.a2a.execute` / `agentling.a2a.cancel` | A2A executor. |
+| `agentling.mcp.call_tool` | MCP server. |
+| `agentling.engine.spawn` / `.poll` / `.cancel` | Task engine entry points. |
+| `agentling.task.worker` | Per-task worker. Stamps token totals as attributes. |
+| `agentling.completion` | LLM completion cycle. Stamps cycle-wide token totals. |
+| `agentling.completion.llm_call` | One LLM turn. Per-turn token attributes. |
+| `agentling.completion.tool_exec` | Per-tool execution within a turn. |
+| `agentling.llm.complete` / `.count_tokens` / `.batch_create` / `.batch_status` / `.batch_results` | LLM client calls. Token usage attributes on the `complete` span. |
+| `agentling.engine.recovery` | Startup crash-recovery pass. |
+| `agentling.sleep.*` | Nightly sleep cycle phases (when enabled). |
+| `agentling.memory.list/set/remove` | Memory tool operations. |
+
+### Metrics emitted
+
+**Tokens** (per-call histograms + monotonic counters, labeled by `llm.model`, `llm.path` of `live`/`batch`):
+
+- `agentling.llm.input_tokens` / `_total`
+- `agentling.llm.output_tokens` / `_total`
+- `agentling.llm.cache_creation_input_tokens` / `_total`
+- `agentling.llm.cache_read_input_tokens` / `_total`
+- `agentling.llm.total_tokens`
+- `agentling.llm.cache_hit_ratio`
+- `agentling.llm.calls_total`
+
+**Tasks** (counters + active gauge):
+
+- `agentling.tasks.spawned_total` / `completed_total` / `failed_total` / `cancelled_total`
+- `agentling.tasks.active`
+- `agentling.tasks.context_busy_rejections_total`
+- `agentling.tasks.crash_recovery_repaired_total` / `crash_recovery_failed_total`
+
+**Completion + tools**:
+
+- `agentling.completion.duration_seconds`, `.turns`
+- `agentling.tool.calls`, `.errors`, `.duration_seconds` (labeled by `tool.name`, `tool.is_error`)
+
+**Journal I/O**:
+
+- `agentling.journal.append_seconds` (labeled by `journal.target=parent|sub`)
+- `agentling.journal.replay_seconds`
+- `agentling.journal.bytes_appended_total`
+- `agentling.journal.entries_replayed_total`
+
+**HTTP**:
+
+- `agentling.http.request` span carries `http.status_code`, `http.duration_seconds`, `http.method`, `http.target`.
+
+When telemetry is disabled (the default) or the OpenTelemetry packages are not installed, all instrumentation is a no-op — the cost is one function call per span/metric site.
 
 ## Architecture
 

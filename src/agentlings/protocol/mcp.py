@@ -34,6 +34,7 @@ from agentlings.core.task import (
     TaskState,
     TaskStatus,
 )
+from agentlings.core.telemetry import otel_span
 
 logger = logging.getLogger(__name__)
 
@@ -113,60 +114,79 @@ def create_mcp_server(
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        if name != agent_card.name:
-            return _error_payload("unknown_tool", f"Unknown tool: {name}")
-
         message = arguments.get("message")
         task_id = arguments.get("taskId")
         context_id = arguments.get("contextId")
         wait_seconds = arguments.get("waitSeconds", 0.0)
+        op = "poll" if task_id else "spawn"
 
-        if (message is None or message == "") and not task_id:
-            return _error_payload(
-                "invalid_input",
-                "Either `message` or `taskId` must be provided.",
-            )
-        if message and task_id:
-            return _error_payload(
-                "invalid_input",
-                "`message` and `taskId` are mutually exclusive.",
-            )
+        with otel_span("agentling.mcp.call_tool", {
+            "agent.via": "mcp",
+            "mcp.tool_name": name,
+            "mcp.operation": op,
+            "task.context_id": context_id or "",
+            "task.id": task_id or "",
+            "mcp.message_chars": len(message or ""),
+        }) as span:
+            if name != agent_card.name:
+                span.set_attribute("mcp.outcome", "unknown_tool")
+                return _error_payload("unknown_tool", f"Unknown tool: {name}")
 
-        try:
-            if task_id:
-                state = await engine.poll(
-                    task_id=task_id,
-                    context_id=context_id,
-                    wait_seconds=wait_seconds,
-                    cap_seconds=await_seconds,
+            if (message is None or message == "") and not task_id:
+                span.set_attribute("mcp.outcome", "invalid_input")
+                return _error_payload(
+                    "invalid_input",
+                    "Either `message` or `taskId` must be provided.",
                 )
-            else:
-                assert message is not None
-                state = await engine.spawn(
-                    message=message,
-                    context_id=context_id,
-                    via="mcp",
-                    await_seconds=await_seconds,
+            if message and task_id:
+                span.set_attribute("mcp.outcome", "invalid_input")
+                return _error_payload(
+                    "invalid_input",
+                    "`message` and `taskId` are mutually exclusive.",
                 )
-        except ContextBusyError as e:
-            return _error_payload(
-                "context_busy",
-                str(e),
-                active_task_id=e.active_task_id,
-                context_id=e.context_id,
-            )
-        except TaskNotFoundError as e:
-            return _error_payload("task_not_found", str(e), task_id=e.task_id)
-        except TaskContextMismatchError as e:
-            return _error_payload(
-                "task_context_mismatch",
-                str(e),
-                task_id=e.task_id,
-            )
-        except InvalidTaskInputError as e:
-            return _error_payload("invalid_input", str(e))
 
-        return _format_state(state, await_seconds)
+            try:
+                if task_id:
+                    state = await engine.poll(
+                        task_id=task_id,
+                        context_id=context_id,
+                        wait_seconds=wait_seconds,
+                        cap_seconds=await_seconds,
+                    )
+                else:
+                    assert message is not None
+                    state = await engine.spawn(
+                        message=message,
+                        context_id=context_id,
+                        via="mcp",
+                        await_seconds=await_seconds,
+                    )
+            except ContextBusyError as e:
+                span.set_attribute("mcp.outcome", "context_busy")
+                return _error_payload(
+                    "context_busy",
+                    str(e),
+                    active_task_id=e.active_task_id,
+                    context_id=e.context_id,
+                )
+            except TaskNotFoundError as e:
+                span.set_attribute("mcp.outcome", "task_not_found")
+                return _error_payload("task_not_found", str(e), task_id=e.task_id)
+            except TaskContextMismatchError as e:
+                span.set_attribute("mcp.outcome", "task_context_mismatch")
+                return _error_payload(
+                    "task_context_mismatch",
+                    str(e),
+                    task_id=e.task_id,
+                )
+            except InvalidTaskInputError as e:
+                span.set_attribute("mcp.outcome", "invalid_input")
+                return _error_payload("invalid_input", str(e))
+
+            span.set_attribute("mcp.outcome", state.status.value)
+            span.set_attribute("task.status", state.status.value)
+            span.set_attribute("task.id", state.task_id)
+            return _format_state(state, await_seconds)
 
     return server
 
