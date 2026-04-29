@@ -153,7 +153,7 @@ class AgentConfig(BaseSettings):
     agent_host: str = "0.0.0.0"
     agent_port: int = 8420
     agent_data_dir: Path = Path("./data")
-    agent_skills_dir: Path = Path("./skills")
+    agent_skills_dir: Path | None = None
     agent_log_level: str = "INFO"
     agent_llm_backend: Literal["anthropic", "mock"] = "anthropic"
     agent_external_url: str | None = None
@@ -205,8 +205,13 @@ class AgentConfig(BaseSettings):
         return self._definition.skills
 
     @property
-    def skills_dir(self) -> Path:
-        """Filesystem root for runtime instruction-skills (Open Skills spec)."""
+    def skills_dir(self) -> Path | None:
+        """Filesystem root for runtime instruction-skills (Open Skills spec).
+
+        Opt-in: when ``AGENT_SKILLS_DIR`` is unset, the agent does not scan
+        anywhere. This matches ``AGENT_TOOLS_DIR`` so the two folder-scan
+        env vars share one mental model.
+        """
         return self.agent_skills_dir
 
     @property

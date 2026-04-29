@@ -9,9 +9,11 @@ pattern from the Open Skills specification (https://agentskills.io/specification
 
 Discovery is intentionally lenient: malformed entries are logged and skipped so
 one broken skill does not prevent the agent from booting. It is also strictly
-read-only — no mkdir, no writes, no imports, no ``sys.path`` mutation — so a
-pre-existing ``./skills`` directory in the user's working tree (e.g. from an
-unrelated project) cannot be clobbered by the agent.
+read-only — no mkdir, no writes, no imports, no ``sys.path`` mutation — so an
+existing skills root in the user's filesystem (e.g. from an unrelated project)
+cannot be clobbered by the agent. Discovery itself only runs when the operator
+sets ``AGENT_SKILLS_DIR``; an unset value is a no-op, matching the opt-in
+semantics of ``AGENT_TOOLS_DIR``.
 """
 
 from __future__ import annotations

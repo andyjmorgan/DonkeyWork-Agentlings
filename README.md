@@ -270,7 +270,7 @@ Step-by-step instructions for the agent go below the frontmatter.
 Reference companion files with relative paths, e.g. `scripts/extract.py`.
 ```
 
-Drop skill directories under `./skills` (or anywhere — point `AGENT_SKILLS_DIR` at it). On startup the agentling discovers them and prepends a single block to the system prompt explaining progressive disclosure and listing each skill's name, absolute path, and description. The agent reads `SKILL.md` itself when a task calls for the skill.
+Skills are opt-in: set `AGENT_SKILLS_DIR=./skills` (or any path) and drop skill directories there. On startup the agentling discovers them and prepends a single block to the system prompt explaining progressive disclosure and listing each skill's name, absolute path, and description. The agent reads `SKILL.md` itself when a task calls for the skill.
 
 ### Frontmatter constraints
 
@@ -283,7 +283,7 @@ Per the Open Skills spec:
 
 Optional fields (`license`, `compatibility`, `metadata`, `allowed-tools`) are accepted but currently ignored at the runtime layer. Malformed skills (missing fields, invalid names, broken YAML) are logged at `WARNING` and skipped — one bad skill does not prevent the agent from booting.
 
-Discovery is strictly read-only — the agentling never writes to, deletes from, or modifies anything under `AGENT_SKILLS_DIR`. `agentling init` does not create the directory either; if you don't put one there, discovery is a no-op and no skills block is added to the prompt. The same applies to `AGENT_TOOLS_DIR`: scans are read-only and the user-tools directory is never added to `sys.path`, so a file named `json.py` cannot shadow the stdlib.
+Discovery is strictly read-only — the agentling never writes to, deletes from, or modifies anything under `AGENT_SKILLS_DIR`. `AGENT_SKILLS_DIR` and `AGENT_TOOLS_DIR` share the same opt-in semantics: unset means "don't scan." `AGENT_TOOLS_DIR` additionally never adds the user-tools directory to `sys.path`, so a file named `json.py` cannot shadow the stdlib.
 
 > **Naming note:** the `skills:` array in `agent.yaml` is unrelated — those are A2A Agent Card capabilities advertised on the wire. Runtime skills (this section) live on disk under `AGENT_SKILLS_DIR`.
 
@@ -324,7 +324,7 @@ Secrets and runtime settings stay in env vars or, more commonly, the `.env` file
 | `AGENT_PORT` | `8420` | Bind port |
 | `AGENT_DATA_DIR` | `./data` | JSONL journal storage directory |
 | `AGENT_TOOLS_DIR` | — | Directory of `@tool`-decorated `.py` files to load at startup |
-| `AGENT_SKILLS_DIR` | `./skills` | Directory of Open Skills `SKILL.md` bundles to advertise to the agent |
+| `AGENT_SKILLS_DIR` | — | Directory of Open Skills `SKILL.md` bundles to advertise to the agent |
 | `AGENT_TASK_AWAIT_SECONDS` | `60` | How long the HTTP handler blocks for task completion before returning a working task handle |
 | `AGENT_LOG_LEVEL` | `INFO` | Log level |
 | `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` or `mock` |
