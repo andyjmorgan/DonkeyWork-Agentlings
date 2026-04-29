@@ -18,6 +18,8 @@ from agentlings.cli import _migrations, _templates, _version
 logger = logging.getLogger(__name__)
 
 DATA_DIRNAME = "data"
+SKILLS_DIRNAME = "skills"
+TOOLS_DIRNAME = "tools"
 ENV_FILENAME = ".env"
 ENV_EXAMPLE_FILENAME = ".env.example"
 YAML_FILENAME = "agent.yaml"
@@ -64,6 +66,8 @@ def init_agent(
 
     target.mkdir(parents=True, exist_ok=True)
     (target / DATA_DIRNAME).mkdir(exist_ok=True)
+    (target / SKILLS_DIRNAME).mkdir(exist_ok=True)
+    (target / TOOLS_DIRNAME).mkdir(exist_ok=True)
 
     yaml_path = target / YAML_FILENAME
     if not yaml_path.exists() or force:

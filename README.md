@@ -44,8 +44,10 @@ my-agent/
 ├── .env                 # AGENT_API_KEY auto-generated; ANTHROPIC_API_KEY blank for you
 ├── .env.example         # checked into source control as a template
 ├── .framework-version   # the framework version that scaffolded this dir
-└── data/                # journals, memory, conversations
-    └── .migrations      # applied-migrations log
+├── data/                # journals, memory, conversations
+│   └── .migrations      # applied-migrations log
+├── skills/              # drop SKILL.md bundles here; uncomment AGENT_SKILLS_DIR to enable
+└── tools/               # drop @tool-decorated .py files here; uncomment AGENT_TOOLS_DIR to enable
 ```
 
 `agentling run` reads `agent.yaml`, `.env`, and `data/` from the current directory. To operate on a different dir without `cd`-ing in: `agentling run --dir /path/to/agent`.
