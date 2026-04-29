@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="Agentlings" width="256">
+  <img src="media/logo.png" alt="Agentlings" width="256">
 </p>
 
 <h1 align="center">Agentlings</h1>
@@ -191,7 +191,7 @@ Tools are off by default. Run `agentling list-tools` for details.
 ## Custom tools
 
 <p align="center">
-  <img src="tools.png" alt="Custom tools" width="256">
+  <img src="media/tools.png" alt="Custom tools" width="256">
 </p>
 
 Beyond the built-ins, you can author your own tools as plain typed Python functions. Decorate them with `@tool`, drop the file in a directory, and point `AGENT_TOOLS_DIR` at it — the agentling scans the directory at startup and registers every `Tool` it finds.
@@ -243,7 +243,7 @@ Reference tools showcasing each pattern live in `agentlings.tools.examples` (`ec
 ## Skills
 
 <p align="center">
-  <img src="skills.png" alt="Skills" width="256">
+  <img src="media/skills.png" alt="Skills" width="256">
 </p>
 
 Skills are bundled instructions the agent activates on demand. Each skill is a directory containing a `SKILL.md` whose YAML frontmatter (`name`, `description`) is loaded into the system prompt at startup; the body — and any sibling `scripts/`, `references/`, or `assets/` — stays on disk until the agent decides the task needs it. This is the **progressive disclosure** model from the [Open Skills specification](https://agentskills.io/specification): metadata is cheap, instructions are loaded on activation, resources are loaded on demand.
@@ -386,7 +386,7 @@ memory:
 ## Sleep cycle
 
 <p align="center">
-  <img src="sleep.png" alt="Sleep Cycle" width="256">
+  <img src="media/sleep.png" alt="Sleep Cycle" width="256">
 </p>
 
 The sleep cycle is a nightly process that journals the day's activity, consolidates new knowledge into memory, prunes stale entries, and cleans up old files. It maps to biological sleep phases.
