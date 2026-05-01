@@ -1,17 +1,17 @@
-"""MCP protocol server exposing the agentling as a single task-aware tool.
+"""MCP protocol server exposing the agentling as task-aware tools.
 
-The tool has four input fields:
+Two tools are registered, mirroring A2A's ``message/send`` + ``tasks/get``:
 
-- ``contextId`` (optional) — which conversation to append to or continue.
-- ``message`` (optional) — a new request to the agent.
-- ``taskId`` (optional) — an existing task to poll.
-- ``waitSeconds`` (optional) — when polling, how long to block for completion.
+- ``<agent_name>`` — start a new task. Inputs: ``message`` (required),
+  ``contextId`` (optional).
+- ``<agent_name>__get_task`` — poll an existing task. Inputs: ``taskId``
+  (required), ``contextId`` (optional), ``waitSeconds`` (optional).
 
-``message`` and ``taskId`` are mutually exclusive. Sending ``message`` starts a
-task; sending ``taskId`` polls an existing one. In either case the response is
-a ``CallToolResult`` whose ``structuredContent`` tells the caller whether the
-task completed (and the final response) or is still working (with the taskId
-to poll later).
+Both schemas declare ``additionalProperties: false`` so the MCP SDK's
+input validator rejects unknown fields before the handler runs. Required
+fields are enforced the same way. The handler keeps only genuine
+business-logic checks (engine dispatch, error mapping). Responses are
+the same message-shape envelope in both cases.
 """
 
 from __future__ import annotations
@@ -44,11 +44,11 @@ def create_mcp_server(
     agent_card: AgentCard,
     config: AgentConfig,
 ) -> Server:
-    """Create an MCP server with a single task-aware tool.
+    """Create an MCP server exposing spawn + get_task tools.
 
     Args:
         loop: The message loop exposing the shared task engine.
-        agent_card: The agent card whose name and description define the tool.
+        agent_card: The agent card whose name and description define the tools.
         config: Agent configuration (for the await timeout cap).
 
     Returns:
@@ -58,18 +58,16 @@ def create_mcp_server(
     engine = loop.engine
     await_seconds = float(getattr(config, "agent_task_await_seconds", 60))
 
-    tool = Tool(
-        name=agent_card.name,
+    spawn_name = agent_card.name
+    get_task_name = f"{agent_card.name}__get_task"
+
+    spawn_tool = Tool(
+        name=spawn_name,
         description=(
             f"{agent_card.description}\n\n"
-            "Exactly one of `message` or `taskId` must be provided:\n"
-            "- `message`: start a new task (natural-language request).\n"
-            "- `taskId`: poll an existing task returned by a prior call "
-            "whose status was `working`.\n\n"
-            "The response's `structuredContent.status` is either `completed` "
-            "(final response in `message`) or `working` (retry with `taskId`). "
-            "`waitSeconds` applies only to polls and is capped at "
-            f"{int(await_seconds)} seconds."
+            "Start a new task. The response's `status` is either `completed` "
+            f"(final response in `message`) or `working` — in the working "
+            f"case, retry via `{get_task_name}` with the returned `taskId`."
         ),
         inputSchema={
             "type": "object",
@@ -77,48 +75,86 @@ def create_mcp_server(
                 "contextId": {
                     "type": "string",
                     "description": (
-                        "Context ID from a previous response. Optional. Include "
-                        "to continue an existing conversation."
+                        "Context ID from a previous response. Optional. "
+                        "Include to continue an existing conversation."
                     ),
                 },
                 "message": {
                     "type": "string",
-                    "description": (
-                        "Natural language request to the agent. Mutually "
-                        "exclusive with `taskId`."
-                    ),
+                    "description": "Natural language request to the agent.",
                 },
+            },
+            "required": ["message"],
+            "additionalProperties": False,
+        },
+    )
+
+    get_task_tool = Tool(
+        name=get_task_name,
+        description=(
+            f"Poll the state of a task previously returned by `{spawn_name}` "
+            "whose status was `working`. The response uses the same envelope "
+            "shape: `status` is `completed`, `working`, `failed`, or "
+            f"`cancelled`. `waitSeconds` is capped at {int(await_seconds)} "
+            "seconds server-side."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
                 "taskId": {
                     "type": "string",
                     "description": (
-                        "Task ID returned by a prior call that yielded a working "
-                        "status. Mutually exclusive with `message`."
+                        "Task ID returned by a prior call that yielded a "
+                        "working status."
+                    ),
+                },
+                "contextId": {
+                    "type": "string",
+                    "description": (
+                        "Optional context ID. When provided, the server "
+                        "asserts the task belongs to it."
                     ),
                 },
                 "waitSeconds": {
                     "type": "number",
                     "minimum": 0,
                     "description": (
-                        "Maximum seconds to block on a poll, capped server-side. "
-                        "Ignored when `message` is provided."
+                        "Maximum seconds to block on this poll, capped "
+                        "server-side."
                     ),
                 },
             },
+            "required": ["taskId"],
             "additionalProperties": False,
         },
     )
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        return [tool]
+        return [spawn_tool, get_task_tool]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        message = arguments.get("message")
-        task_id = arguments.get("taskId")
         context_id = arguments.get("contextId")
-        wait_seconds = arguments.get("waitSeconds", 0.0)
-        op = "poll" if task_id else "spawn"
+
+        if name == spawn_name:
+            op = "spawn"
+            message = arguments.get("message")
+            task_id = None
+            wait_seconds = 0.0
+        elif name == get_task_name:
+            op = "poll"
+            message = None
+            task_id = arguments.get("taskId")
+            wait_seconds = arguments.get("waitSeconds", 0.0)
+        else:
+            with otel_span("agentling.mcp.call_tool", {
+                "agent.via": "mcp",
+                "mcp.tool_name": name,
+                "mcp.operation": "unknown",
+            }) as span:
+                span.set_attribute("mcp.outcome", "unknown_tool")
+            return _error_payload("unknown_tool", f"Unknown tool: {name}")
 
         with otel_span("agentling.mcp.call_tool", {
             "agent.via": "mcp",
@@ -128,25 +164,9 @@ def create_mcp_server(
             "task.id": task_id or "",
             "mcp.message_chars": len(message or ""),
         }) as span:
-            if name != agent_card.name:
-                span.set_attribute("mcp.outcome", "unknown_tool")
-                return _error_payload("unknown_tool", f"Unknown tool: {name}")
-
-            if (message is None or message == "") and not task_id:
-                span.set_attribute("mcp.outcome", "invalid_input")
-                return _error_payload(
-                    "invalid_input",
-                    "Either `message` or `taskId` must be provided.",
-                )
-            if message and task_id:
-                span.set_attribute("mcp.outcome", "invalid_input")
-                return _error_payload(
-                    "invalid_input",
-                    "`message` and `taskId` are mutually exclusive.",
-                )
-
             try:
-                if task_id:
+                if op == "poll":
+                    assert task_id is not None
                     state = await engine.poll(
                         task_id=task_id,
                         context_id=context_id,
@@ -186,37 +206,29 @@ def create_mcp_server(
             span.set_attribute("mcp.outcome", state.status.value)
             span.set_attribute("task.status", state.status.value)
             span.set_attribute("task.id", state.task_id)
-            return _format_state(state, await_seconds)
+            return _format_state(state, await_seconds, get_task_name)
 
     return server
 
 
-def _format_state(state: TaskState, await_seconds: float) -> list[TextContent]:
+def _format_state(
+    state: TaskState, await_seconds: float, get_task_name: str
+) -> list[TextContent]:
     """Turn a ``TaskState`` into an MCP ``CallToolResult`` payload."""
-    structured: dict[str, Any] = {
-        "taskId": state.task_id,
-        "contextId": state.context_id,
-        "status": state.status.value,
-    }
     if state.status == TaskStatus.COMPLETED:
         response_text = _extract_text(state.content)
-        structured["message"] = response_text
         envelope = {
             "contextId": state.context_id,
             "taskId": state.task_id,
             "message": response_text,
             "status": state.status.value,
         }
-        return [TextContent(
-            type="text",
-            text=json.dumps(envelope),
-        )]
+        return [TextContent(type="text", text=json.dumps(envelope))]
 
     if state.status == TaskStatus.WORKING:
-        structured["pollAfterMs"] = 10_000
         human = (
-            f"Task {state.task_id} still running. "
-            f"Call again with taskId={state.task_id} to poll "
+            f"Task {state.task_id} still running. Call `{get_task_name}` "
+            f"with taskId={state.task_id} to poll "
             f"(waitSeconds up to {int(await_seconds)})."
         )
         envelope = {
@@ -228,7 +240,6 @@ def _format_state(state: TaskState, await_seconds: float) -> list[TextContent]:
         }
         return [TextContent(type="text", text=json.dumps(envelope))]
 
-    # Failed or cancelled — return an error-shaped payload.
     envelope = {
         "contextId": state.context_id,
         "taskId": state.task_id,

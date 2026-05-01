@@ -52,23 +52,64 @@ class MCPTestClient:
                     for t in result.tools
                 ]
 
-    async def _tool_name(self) -> str:
-        async with streamablehttp_client(
-            self._url, headers=self._headers
-        ) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                return tools.tools[0].name
+    async def _spawn_tool_name(self, session: ClientSession) -> str:
+        tools = await session.list_tools()
+        for t in tools.tools:
+            if not t.name.endswith("__get_task"):
+                return t.name
+        raise RuntimeError("no spawn tool found")
 
-    async def _call(self, arguments: dict[str, Any]) -> MCPToolCallResult:
+    async def _get_task_tool_name(self, session: ClientSession) -> str:
+        tools = await session.list_tools()
+        for t in tools.tools:
+            if t.name.endswith("__get_task"):
+                return t.name
+        raise RuntimeError("no get_task tool found")
+
+    async def _call_named(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> MCPToolCallResult:
         async with streamablehttp_client(
             self._url, headers=self._headers
         ) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                tools = await session.list_tools()
-                tool_name = tools.tools[0].name
+                result = await session.call_tool(tool_name, arguments)
+                text_content = result.content[0].text  # type: ignore[attr-defined]
+                parsed = json.loads(text_content)
+                return MCPToolCallResult(
+                    context_id=parsed.get("contextId"),
+                    message=parsed.get("message", ""),
+                    status=parsed.get("status", parsed.get("error", "")),
+                    task_id=parsed.get("taskId") or parsed.get("activeTaskId"),
+                    raw=parsed,
+                )
+
+    async def _call_spawn(self, arguments: dict[str, Any]) -> MCPToolCallResult:
+        async with streamablehttp_client(
+            self._url, headers=self._headers
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tool_name = await self._spawn_tool_name(session)
+                result = await session.call_tool(tool_name, arguments)
+                text_content = result.content[0].text  # type: ignore[attr-defined]
+                parsed = json.loads(text_content)
+                return MCPToolCallResult(
+                    context_id=parsed.get("contextId"),
+                    message=parsed.get("message", ""),
+                    status=parsed.get("status", parsed.get("error", "")),
+                    task_id=parsed.get("taskId") or parsed.get("activeTaskId"),
+                    raw=parsed,
+                )
+
+    async def _call_get_task(self, arguments: dict[str, Any]) -> MCPToolCallResult:
+        async with streamablehttp_client(
+            self._url, headers=self._headers
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tool_name = await self._get_task_tool_name(session)
                 result = await session.call_tool(tool_name, arguments)
                 text_content = result.content[0].text  # type: ignore[attr-defined]
                 parsed = json.loads(text_content)
@@ -87,7 +128,7 @@ class MCPTestClient:
         args: dict[str, Any] = {"message": message}
         if context_id is not None:
             args["contextId"] = context_id
-        return await self._call(args)
+        return await self._call_spawn(args)
 
     async def poll_task(
         self,
@@ -95,12 +136,46 @@ class MCPTestClient:
         context_id: str | None = None,
         wait_seconds: float = 0.0,
     ) -> MCPToolCallResult:
-        """Poll an existing task for its current state."""
+        """Poll an existing task for its current state via the get_task tool."""
         args: dict[str, Any] = {"taskId": task_id, "waitSeconds": wait_seconds}
         if context_id is not None:
             args["contextId"] = context_id
-        return await self._call(args)
+        return await self._call_get_task(args)
 
-    async def call_invalid(self, arguments: dict[str, Any]) -> MCPToolCallResult:
-        """Issue an arbitrary arguments payload (for validation tests)."""
-        return await self._call(arguments)
+    async def call_invalid(
+        self,
+        arguments: dict[str, Any],
+        *,
+        on_get_task: bool = False,
+    ) -> MCPToolCallResult:
+        """Issue an arbitrary arguments payload that the handler will shape
+        as a JSON envelope (engine-level errors only)."""
+        if on_get_task:
+            return await self._call_get_task(arguments)
+        return await self._call_spawn(arguments)
+
+    async def call_raw(
+        self,
+        arguments: dict[str, Any],
+        *,
+        on_get_task: bool = False,
+    ) -> tuple[bool, str]:
+        """Issue a raw call and return (isError, content_text).
+
+        For asserting SDK-level schema validation responses, which are plain
+        text (not the handler's JSON envelope) and would otherwise fail to
+        parse via ``_call_named``.
+        """
+        async with streamablehttp_client(
+            self._url, headers=self._headers
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tool_name = (
+                    await self._get_task_tool_name(session)
+                    if on_get_task
+                    else await self._spawn_tool_name(session)
+                )
+                result = await session.call_tool(tool_name, arguments)
+                text = result.content[0].text  # type: ignore[attr-defined]
+                return bool(result.isError), text

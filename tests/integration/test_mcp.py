@@ -5,39 +5,54 @@ import pytest
 from tests.integration.mcp_client import MCPTestClient
 
 
+def _by_name(tools: list[dict], suffix: str = "") -> dict:
+    for t in tools:
+        if suffix:
+            if t["name"].endswith(suffix):
+                return t
+        else:
+            if not t["name"].endswith("__get_task"):
+                return t
+    raise AssertionError(f"no tool found matching suffix={suffix!r}")
+
+
 class TestMCPToolsList:
     @pytest.mark.asyncio
-    async def test_lists_single_tool(self, mcp_client: MCPTestClient) -> None:
+    async def test_lists_two_tools(self, mcp_client: MCPTestClient) -> None:
         tools = await mcp_client.list_tools()
-        assert len(tools) == 1
+        assert len(tools) == 2
 
     @pytest.mark.asyncio
-    async def test_tool_name_matches_agent(self, mcp_client: MCPTestClient) -> None:
-        tools = await mcp_client.list_tools()
-        assert tools[0]["name"] == "test-agent"
-
-    @pytest.mark.asyncio
-    async def test_tool_schema_has_task_fields(
+    async def test_spawn_tool_name_matches_agent(
         self, mcp_client: MCPTestClient
     ) -> None:
         tools = await mcp_client.list_tools()
-        schema = tools[0]["inputSchema"]
+        spawn = _by_name(tools)
+        assert spawn["name"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_get_task_tool_name(self, mcp_client: MCPTestClient) -> None:
+        tools = await mcp_client.list_tools()
+        get_task = _by_name(tools, "__get_task")
+        assert get_task["name"] == "test-agent__get_task"
+
+    @pytest.mark.asyncio
+    async def test_spawn_schema_shape(self, mcp_client: MCPTestClient) -> None:
+        tools = await mcp_client.list_tools()
+        schema = _by_name(tools)["inputSchema"]
         props = schema["properties"]
-        assert "message" in props
-        assert "taskId" in props
-        assert "contextId" in props
-        assert "waitSeconds" in props
-        # v2: nothing is required; server validates mutual exclusion at call time.
-        assert schema.get("required", []) == []
+        assert set(props.keys()) == {"message", "contextId"}
+        assert schema.get("required", []) == ["message"]
+        assert schema.get("additionalProperties") is False
 
     @pytest.mark.asyncio
-    async def test_tool_schema_has_optional_context_id(
-        self, mcp_client: MCPTestClient
-    ) -> None:
+    async def test_get_task_schema_shape(self, mcp_client: MCPTestClient) -> None:
         tools = await mcp_client.list_tools()
-        schema = tools[0]["inputSchema"]
-        assert "contextId" in schema["properties"]
-        assert "contextId" not in schema.get("required", [])
+        schema = _by_name(tools, "__get_task")["inputSchema"]
+        props = schema["properties"]
+        assert set(props.keys()) == {"taskId", "contextId", "waitSeconds"}
+        assert schema.get("required", []) == ["taskId"]
+        assert schema.get("additionalProperties") is False
 
 
 class TestMCPToolCall:
@@ -75,7 +90,7 @@ class TestMCPToolCall:
 
 
 class TestMCPTaskPolling:
-    """Tests that exercise the poll path with a completed task."""
+    """Tests that exercise the get_task tool against a completed task."""
 
     @pytest.mark.asyncio
     async def test_poll_completed_task_returns_final_response(
@@ -103,39 +118,63 @@ class TestMCPTaskPolling:
         self, mcp_client: MCPTestClient
     ) -> None:
         polled = await mcp_client.poll_task("nonexistent-task-id")
-        # Error envelope uses raw["error"] and our dataclass maps it to status.
         assert polled.raw.get("error") == "task_not_found"
 
 
 class TestMCPInputValidation:
-    @pytest.mark.asyncio
-    async def test_missing_message_and_task_id(
-        self, mcp_client: MCPTestClient
-    ) -> None:
-        result = await mcp_client.call_invalid({})
-        assert result.raw.get("error") == "invalid_input"
+    """Schema-level validation comes from the MCP SDK's jsonschema pass.
+
+    With the split into two tools, mutual-exclusion is enforced by shape:
+    the spawn tool has no ``taskId`` field, the get_task tool has no
+    ``message`` field. Both schemas declare ``additionalProperties: false``
+    and required fields, so the SDK rejects malformed payloads before the
+    handler runs. Schema rejections come back as ``isError=True`` with a
+    plain-text ``"Input validation error"`` message — not the handler's
+    JSON envelope.
+    """
 
     @pytest.mark.asyncio
-    async def test_both_message_and_task_id(
+    async def test_spawn_rejects_extra_property(
         self, mcp_client: MCPTestClient
     ) -> None:
-        result = await mcp_client.call_invalid(
+        is_error, text = await mcp_client.call_raw(
             {"message": "hi", "taskId": "some-task"}
         )
-        assert result.raw.get("error") == "invalid_input"
+        assert is_error
+        assert "validation" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_spawn_rejects_missing_message(
+        self, mcp_client: MCPTestClient
+    ) -> None:
+        is_error, text = await mcp_client.call_raw({})
+        assert is_error
+        assert "validation" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_get_task_rejects_missing_task_id(
+        self, mcp_client: MCPTestClient
+    ) -> None:
+        is_error, text = await mcp_client.call_raw({}, on_get_task=True)
+        assert is_error
+        assert "validation" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_get_task_rejects_extra_property(
+        self, mcp_client: MCPTestClient
+    ) -> None:
+        is_error, text = await mcp_client.call_raw(
+            {"taskId": "abc", "message": "no"}, on_get_task=True
+        )
+        assert is_error
+        assert "validation" in text.lower()
 
     @pytest.mark.asyncio
     async def test_whitespace_only_message_rejected(
         self, mcp_client: MCPTestClient
     ) -> None:
-        """Engine-level validation must be caught and shaped cleanly.
-
-        Regression: when whitespace-only messages slipped past the
-        handler's ``message == ""`` literal check, the ``engine.spawn()``
-        raised ``InvalidTaskInputError`` which the handler attempted to
-        match in an ``except`` clause — but the name was not imported,
-        causing a ``NameError`` to propagate instead of a clean envelope.
-        """
+        """Whitespace-only messages pass schema validation but fail at the
+        engine; the handler maps ``InvalidTaskInputError`` onto an
+        ``invalid_input`` JSON envelope."""
         result = await mcp_client.call_invalid({"message": "   \n\t  "})
         assert result.raw.get("error") == "invalid_input"
-
