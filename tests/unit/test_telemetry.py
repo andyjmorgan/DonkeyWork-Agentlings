@@ -128,6 +128,13 @@ def otel_pipeline() -> Iterator[dict]:
     tele._initialized = True
     tele._instruments.clear()
 
+    # The task module's _TaskMetrics is built once at import via lru_cache,
+    # so it captured a no-op counter before the fixture set the meter.
+    # Refresh it so async-path counters land in the in-memory reader.
+    import agentlings.core.task as task_module
+    task_module._build_metrics.cache_clear()
+    task_module._METRICS = task_module._build_metrics()
+
     def all_metrics() -> list:
         data = metric_reader.get_metrics_data()
         out: list = []
@@ -287,6 +294,104 @@ class TestEngineSpawnContextPropagation:
         assert worker.attributes["task.input_tokens"] >= 1
         assert worker.attributes["task.output_tokens"] >= 1
         assert worker.attributes["task.terminal"] == "completed"
+
+
+class TestAwaitWindowTelemetry:
+    """Spawn/poll surface their await-window outcome via span attributes + metric."""
+
+    @pytest.mark.asyncio
+    async def test_spawn_completed_within_window_records_completed(
+        self, otel_pipeline, test_config, tmp_data_dir
+    ) -> None:
+        from agentlings.core.llm import MockLLMClient
+        from agentlings.core.store import JournalStore
+        from agentlings.core.task import TaskEngine
+        from agentlings.tools.registry import ToolRegistry
+
+        engine = TaskEngine(
+            config=test_config,
+            store=JournalStore(tmp_data_dir),
+            llm=MockLLMClient(),
+            tools=ToolRegistry(),
+        )
+        await engine.spawn(message="hi", await_seconds=5.0)
+
+        spans = otel_pipeline["spans"]()
+        spawn = next(s for s in spans if s.name == "agentling.engine.spawn")
+        assert spawn.attributes["task.await_outcome"] == "completed"
+
+        names = _metric_names(otel_pipeline["metrics"]())
+        assert "agentling.tasks.await_window_timeouts_total" not in names
+
+    @pytest.mark.asyncio
+    async def test_spawn_timeout_records_timed_out_and_increments_counter(
+        self, otel_pipeline, test_config, tmp_data_dir
+    ) -> None:
+        from agentlings.core.store import JournalStore
+        from agentlings.core.task import TaskEngine
+        from agentlings.tools.registry import ToolRegistry
+        from tests.unit.test_task import ControllableLLM
+
+        llm = ControllableLLM()
+        engine = TaskEngine(
+            config=test_config,
+            store=JournalStore(tmp_data_dir),
+            llm=llm,
+            tools=ToolRegistry(),
+        )
+
+        state = await engine.spawn(message="slow", await_seconds=0.05)
+
+        spans = otel_pipeline["spans"]()
+        spawn = next(s for s in spans if s.name == "agentling.engine.spawn")
+        assert spawn.attributes["task.await_outcome"] == "timed_out"
+
+        names = _metric_names(otel_pipeline["metrics"]())
+        assert "agentling.tasks.await_window_timeouts_total" in names
+
+        from agentlings.core.llm import LLMResponse
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "ok"}], stop_reason="end_turn",
+        ))
+        rec = engine.registry.get(state.task_id)
+        if rec is not None:
+            import asyncio as _a
+            await _a.wait_for(rec.completion_event.wait(), timeout=2.0)
+
+    @pytest.mark.asyncio
+    async def test_poll_records_wait_capping(
+        self, otel_pipeline, test_config, tmp_data_dir
+    ) -> None:
+        from agentlings.core.llm import LLMResponse
+        from agentlings.core.store import JournalStore
+        from agentlings.core.task import TaskEngine
+        from agentlings.tools.registry import ToolRegistry
+        from tests.unit.test_task import ControllableLLM
+
+        llm = ControllableLLM()
+        engine = TaskEngine(
+            config=test_config,
+            store=JournalStore(tmp_data_dir),
+            llm=llm,
+            tools=ToolRegistry(),
+        )
+        state = await engine.spawn(message="slow", await_seconds=0.05)
+
+        await engine.poll(state.task_id, wait_seconds=10.0, cap_seconds=0.05)
+
+        spans = otel_pipeline["spans"]()
+        poll = next(s for s in spans if s.name == "agentling.engine.poll")
+        assert poll.attributes["task.await_outcome"] == "timed_out"
+        assert poll.attributes["task.wait_capped_seconds"] == pytest.approx(0.05)
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "ok"}], stop_reason="end_turn",
+        ))
+        rec = engine.registry.get(state.task_id)
+        if rec is not None:
+            import asyncio as _a
+            await _a.wait_for(rec.completion_event.wait(), timeout=2.0)
 
 
 class TestJournalMetrics:

@@ -81,6 +81,7 @@ class _TaskMetrics:
     context_busy_rejections: Any
     crash_recovery_repaired: Any
     crash_recovery_failed: Any
+    await_window_timeouts: Any
 
 
 @functools.lru_cache(maxsize=1)
@@ -118,6 +119,13 @@ def _build_metrics() -> _TaskMetrics:
         crash_recovery_failed=m.create_counter(
             "agentling.tasks.crash_recovery_failed_total",
             description="Recovery passes that raised an exception for a context.",
+        ),
+        await_window_timeouts=m.create_counter(
+            "agentling.tasks.await_window_timeouts_total",
+            description=(
+                "Spawn/poll calls whose await window expired before the task "
+                "reached a terminal state. Used to size agent_task_await_seconds."
+            ),
         ),
     )
 
@@ -751,15 +759,21 @@ class TaskEngine:
                 extra={"task_id": task_id, "context_id": ctx_id, "via": via},
             )
 
+            await_outcome = "skipped"
             try:
                 if await_seconds > 0:
                     await asyncio.wait_for(
                         record.completion_event.wait(),
                         timeout=await_seconds,
                     )
+                    await_outcome = "completed"
             except asyncio.TimeoutError:
-                pass
+                await_outcome = "timed_out"
+                _METRICS.await_window_timeouts.add(
+                    1, {"operation": "spawn", "via": via}
+                )
 
+            span.set_attribute("task.await_outcome", await_outcome)
             state = self._state_from_task(task_id, ctx_id, record, task_journal)
             span.set_attribute("task.status", state.status.value)
             return state
@@ -812,16 +826,23 @@ class TaskEngine:
                     searched=f"context={resolved_ctx}",
                 )
 
+            await_outcome = "skipped"
             if wait_seconds > 0 and record is not None:
                 effective = min(wait_seconds, cap_seconds)
+                span.set_attribute("task.wait_capped_seconds", effective)
                 try:
                     await asyncio.wait_for(
                         record.completion_event.wait(),
                         timeout=effective,
                     )
+                    await_outcome = "completed"
                 except asyncio.TimeoutError:
-                    pass
+                    await_outcome = "timed_out"
+                    _METRICS.await_window_timeouts.add(
+                        1, {"operation": "poll"}
+                    )
 
+            span.set_attribute("task.await_outcome", await_outcome)
             record = self._registry.get(task_id) or record
             state = self._state_from_task(task_id, resolved_ctx, record, task_journal)
             span.set_attribute("task.status", state.status.value)
