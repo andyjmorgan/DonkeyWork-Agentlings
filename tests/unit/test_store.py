@@ -15,7 +15,12 @@ from agentlings.core.models import (
     TaskFailed,
     TaskStarted,
 )
-from agentlings.core.store import ContextNotFoundError, JournalStore, TaskJournal
+from agentlings.core.store import (
+    ContextNotFoundError,
+    JournalStore,
+    TaskJournal,
+    tag_message_content,
+)
 
 
 @pytest.fixture
@@ -362,11 +367,140 @@ class TestReplayFiltersAuditMarkers:
 
         messages = store.replay("ctx-1")
         # From the latest compaction onwards: compaction, user, assistant.
-        # Audit markers for t2 and t3 are stripped.
+        # Audit markers for t2 and t3 are stripped. Merged-back messages
+        # carry their task_id, so replay prepends a ``[task t3]`` tag block.
         assert [m["role"] for m in messages] == ["assistant", "user", "assistant"]
         assert messages[0]["content"] == "summary"
-        assert messages[1]["content"] == [{"type": "text", "text": "new"}]
-        assert messages[2]["content"] == [{"type": "text", "text": "ack"}]
+        assert messages[1]["content"] == [
+            {"type": "text", "text": "[task t3]"},
+            {"type": "text", "text": "new"},
+        ]
+        assert messages[2]["content"] == [
+            {"type": "text", "text": "[task t3]"},
+            {"type": "text", "text": "ack"},
+        ]
+
+
+class TestTaskIdTagging:
+    """Replay surfaces each message's task_id as a leading ``[task <id>]`` block.
+
+    The tag is what lets the LLM correlate a conversation turn with the
+    sub-journal that produced it — without it, the parent journal's user/
+    assistant pairs are anonymous and the agent has no way to recover what
+    tools were actually called inside a given turn.
+    """
+
+    def test_helper_no_tag_when_task_id_missing(self) -> None:
+        content = [{"type": "text", "text": "hi"}]
+        assert tag_message_content(content, None) == content
+
+    def test_helper_no_tag_when_task_id_empty_string(self) -> None:
+        content = [{"type": "text", "text": "hi"}]
+        assert tag_message_content(content, "") == content
+
+    def test_helper_prepends_tag_block(self) -> None:
+        original = [{"type": "text", "text": "hi"}]
+        tagged = tag_message_content(original, "abc-123")
+        assert tagged == [
+            {"type": "text", "text": "[task abc-123]"},
+            {"type": "text", "text": "hi"},
+        ]
+
+    def test_helper_does_not_mutate_input(self) -> None:
+        original = [{"type": "text", "text": "hi"}]
+        tag_message_content(original, "abc-123")
+        assert original == [{"type": "text", "text": "hi"}]
+
+    def test_replay_tags_user_message_with_task_id(
+        self, store: JournalStore
+    ) -> None:
+        store.create("ctx-1")
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="user",
+                content=[{"type": "text", "text": "upgrade grafana"}],
+                task_id="task-abc",
+            ),
+        )
+        messages = store.replay("ctx-1")
+        assert messages[0]["content"] == [
+            {"type": "text", "text": "[task task-abc]"},
+            {"type": "text", "text": "upgrade grafana"},
+        ]
+
+    def test_replay_tags_assistant_message_with_task_id(
+        self, store: JournalStore
+    ) -> None:
+        store.create("ctx-1")
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="assistant",
+                content=[{"type": "text", "text": "done"}],
+                task_id="task-abc",
+            ),
+        )
+        messages = store.replay("ctx-1")
+        assert messages[0]["content"] == [
+            {"type": "text", "text": "[task task-abc]"},
+            {"type": "text", "text": "done"},
+        ]
+
+    def test_replay_skips_tag_when_task_id_is_none(
+        self, store: JournalStore
+    ) -> None:
+        """Pre-task-era journal entries (no task_id) replay verbatim."""
+        store.create("ctx-1")
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="user",
+                content=[{"type": "text", "text": "untagged"}],
+            ),
+        )
+        messages = store.replay("ctx-1")
+        assert messages[0]["content"] == [{"type": "text", "text": "untagged"}]
+
+    def test_replay_tags_each_task_independently(
+        self, store: JournalStore
+    ) -> None:
+        """Different turns from different tasks each carry their own tag."""
+        store.create("ctx-1")
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="user",
+                content=[{"type": "text", "text": "first"}],
+                task_id="task-1",
+            ),
+        )
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="assistant",
+                content=[{"type": "text", "text": "one"}],
+                task_id="task-1",
+            ),
+        )
+        store.append(
+            "ctx-1",
+            MessageEntry(
+                ctx="ctx-1",
+                role="user",
+                content=[{"type": "text", "text": "second"}],
+                task_id="task-2",
+            ),
+        )
+        messages = store.replay("ctx-1")
+        assert messages[0]["content"][0]["text"] == "[task task-1]"
+        assert messages[1]["content"][0]["text"] == "[task task-1]"
+        assert messages[2]["content"][0]["text"] == "[task task-2]"
 
 
 class TestIterContextIds:

@@ -254,6 +254,91 @@ class TestSpawnFastPath:
         assert engine.registry.active_count() == 0
 
 
+class TestCurrentMessageTagging:
+    """The in-flight user message is tagged with the current task's id.
+
+    Without this, the model can see ``[task <id>]`` tags on every prior
+    turn from replay but has no anchor for the message it's responding to
+    right now. Tagging the current turn closes the loop so self-reference
+    works without extra prompting.
+    """
+
+    async def test_current_user_message_carries_task_tag(
+        self, tmp_data_dir: Path, test_config: AgentConfig
+    ) -> None:
+        captured: list[list[dict[str, Any]]] = []
+
+        class CapturingLLM(ControllableLLM):
+            async def complete(self, system, messages, tools, output_schema=None):  # noqa: ANN001
+                captured.append([dict(m) for m in messages])
+                return await super().complete(system, messages, tools, output_schema)
+
+        llm = CapturingLLM()
+        store = JournalStore(tmp_data_dir)
+        tools = ToolRegistry()
+        engine = TaskEngine(config=test_config, store=store, llm=llm, tools=tools)
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "ok"}],
+            stop_reason="end_turn",
+        ))
+        state = await engine.spawn("upgrade grafana")
+
+        assert state.status == TaskStatus.COMPLETED
+        assert captured, "LLM was never called"
+        last_user = captured[0][-1]
+        assert last_user["role"] == "user"
+        assert last_user["content"] == [
+            {"type": "text", "text": f"[task {state.task_id}]"},
+            {"type": "text", "text": "upgrade grafana"},
+        ]
+
+    async def test_subsequent_task_sees_prior_turn_tagged_with_prior_task_id(
+        self, tmp_data_dir: Path, test_config: AgentConfig
+    ) -> None:
+        """A new task replays the merged-back prior turn, tagged with its task_id."""
+        captured: list[list[dict[str, Any]]] = []
+
+        class CapturingLLM(ControllableLLM):
+            async def complete(self, system, messages, tools, output_schema=None):  # noqa: ANN001
+                captured.append([dict(m) for m in messages])
+                return await super().complete(system, messages, tools, output_schema)
+
+        llm = CapturingLLM()
+        store = JournalStore(tmp_data_dir)
+        tools = ToolRegistry()
+        engine = TaskEngine(config=test_config, store=store, llm=llm, tools=tools)
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "done"}],
+            stop_reason="end_turn",
+        ))
+        first = await engine.spawn("first request", context_id="ctx-shared")
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "ack"}],
+            stop_reason="end_turn",
+        ))
+        second = await engine.spawn("second request", context_id="ctx-shared")
+
+        # On the second call, the replay should contain the first task's
+        # merged-back user + assistant turns, each carrying ``[task <first.id>]``.
+        second_messages = captured[1]
+        # Filter to messages that came from replay (everything except the
+        # final fresh user message).
+        replayed = second_messages[:-1]
+        first_tag_block = {"type": "text", "text": f"[task {first.task_id}]"}
+        assert any(
+            isinstance(m["content"], list) and first_tag_block in m["content"]
+            for m in replayed
+        ), f"prior task tag not found in replay: {replayed}"
+        # And the current message carries the new task id.
+        assert second_messages[-1]["content"][0] == {
+            "type": "text",
+            "text": f"[task {second.task_id}]",
+        }
+
+
 # --------------------------------------------------------------------------- #
 # Engine: spawn + slow path (timeout yields working handle)
 # --------------------------------------------------------------------------- #
