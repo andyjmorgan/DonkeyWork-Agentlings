@@ -22,17 +22,44 @@ The following is your long-term memory — facts you have learned over time:
 DEFAULT_DATA_DIR_AWARENESS = """\
 ## Data Directory
 
-Your data directory is at {data_dir}. It contains:
-- memory/memory.json: your long-term memory (also provided above)
-- journals/YYYY-MM-DD.md: daily summaries of your past activity
-- conversations as *.jsonl: raw conversation logs
+Your data directory is at {data_dir}. Layout:
 
-You can read these files using your filesystem tools to recall past context \
-that is not in your current memory. For example:
-- List journals to see which days you were active
-- Read a journal to recall what happened on a specific day
-- Search across journals to find when an issue first appeared
-- Read conversation logs for full detail on a past interaction"""
+- {data_dir}/memory/memory.json — your long-term memory (also provided above)
+- {data_dir}/journals/YYYY-MM-DD.md — daily summaries of your past activity
+- {data_dir}/<context_id>/journal.jsonl — parent journal for a conversation \
+(merged user/assistant turns only)
+- {data_dir}/<context_id>/tasks/<task_id>.jsonl — sub-journal for a single \
+task's execution trace (every tool call, every response)
+
+Every user and assistant message in the conversation above is prefixed with a \
+``[task <id>]`` block indicating which task produced it. Use that id to inspect \
+the corresponding sub-journal if you need to know what was actually done — the \
+parent journal only carries final responses, never the tool-call trace.
+
+## Inspecting Your Own Tasks
+
+Sub-journals can be large — a long task may write hundreds of KB of tool output. \
+Never ``cat`` a sub-journal. Read only what you need:
+
+  Status check (cheap, always safe — last entry is the terminal marker):
+      tail -n 5 {data_dir}/<context_id>/tasks/<task_id>.jsonl
+
+    Look at the last entry's ``t`` field:
+      task_done    → completed; ``final_response`` holds the answer
+      task_fail    → failed; ``reason`` and ``error_details`` on the entry
+      task_cancel  → cancelled; ``reason`` on the entry
+      (no terminal) → still running or merge-back in progress
+
+  Find what tool calls a task made (bounded output):
+      jq -c 'select(.t=="msg" and .role=="assistant")' \
+{data_dir}/<context_id>/tasks/<task_id>.jsonl | head -c 8000
+
+  Find errors:
+      jq -c 'select(.t=="task_fail")' \
+{data_dir}/<context_id>/tasks/<task_id>.jsonl
+
+Ignore entries with ``t`` in ``{{task_dispatch, merge_start, merge_commit}}`` — \
+those are operational audit markers, not conversational content."""
 
 
 def build_system_prompt(

@@ -43,7 +43,7 @@ from agentlings.core.models import (
 )
 from agentlings.core.prompt import build_system_prompt
 from agentlings.core.skills import SkillRef
-from agentlings.core.store import JournalStore, TaskJournal
+from agentlings.core.store import JournalStore, TaskJournal, tag_message_content
 from agentlings.core.telemetry import (
     attach_context,
     capture_context,
@@ -478,7 +478,10 @@ class TaskWorker:
         messages = list(self._store.replay(record.context_id))
         messages.append({
             "role": "user",
-            "content": [{"type": "text", "text": record.message}],
+            "content": tag_message_content(
+                [{"type": "text", "text": record.message}],
+                record.task_id,
+            ),
         })
 
         memory = self._memory_store.load() if self._memory_store else None

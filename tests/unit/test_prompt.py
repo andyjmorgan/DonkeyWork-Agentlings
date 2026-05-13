@@ -138,6 +138,41 @@ class TestDataDirAwareness:
         for block in prompt:
             assert block.get("cache_control") == {"type": "ephemeral"}
 
+    def test_block_describes_actual_layout(
+        self, test_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        """The block must describe the v2 per-context layout, not the legacy flat one."""
+        prompt = build_system_prompt(test_config, data_dir=tmp_data_dir)
+        text = _all_text(prompt)
+        assert "<context_id>/journal.jsonl" in text
+        assert "<context_id>/tasks/<task_id>.jsonl" in text
+
+    def test_block_explains_task_tag_prefix(
+        self, test_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        """The block must tell the agent what ``[task <id>]`` prefixes mean."""
+        prompt = build_system_prompt(test_config, data_dir=tmp_data_dir)
+        text = _all_text(prompt)
+        assert "[task <id>]" in text
+
+    def test_block_teaches_bounded_inspection(
+        self, test_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        """The block must steer the agent toward bounded reads, not ``cat``."""
+        prompt = build_system_prompt(test_config, data_dir=tmp_data_dir)
+        text = _all_text(prompt)
+        assert "tail -n" in text
+        assert "Never ``cat``" in text or "Never `cat`" in text or "Never cat" in text
+
+    def test_block_lists_terminal_markers(
+        self, test_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        prompt = build_system_prompt(test_config, data_dir=tmp_data_dir)
+        text = _all_text(prompt)
+        assert "task_done" in text
+        assert "task_fail" in text
+        assert "task_cancel" in text
+
 
 class TestPromptBlockOrdering:
     """Blocks appear in a consistent order: skills, identity, memory, data dir."""

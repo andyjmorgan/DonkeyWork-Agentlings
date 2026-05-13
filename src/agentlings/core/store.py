@@ -52,6 +52,25 @@ class ContextNotFoundError(Exception):
     """Raised when a context ID does not correspond to an existing journal file."""
 
 
+def tag_message_content(
+    content: list[dict[str, Any]],
+    task_id: str | None,
+) -> list[dict[str, Any]]:
+    """Prepend a ``[task <id>]`` text block to a message's content list.
+
+    Surfaces the task identity that produced each merged-back message into the
+    LLM-visible conversation history. With this, the model can correlate any
+    user/assistant turn to the sub-journal that produced it (``tasks/<id>.jsonl``)
+    without the framework needing to inject anything into the system prompt.
+
+    Returns the content unchanged when ``task_id`` is ``None`` — pre-task-era
+    journals and any future entry type that omits the field replay verbatim.
+    """
+    if not task_id:
+        return content
+    return [{"type": "text", "text": f"[task {task_id}]"}, *content]
+
+
 def _append_jsonl(path: Path, line: str) -> None:
     """Append a single JSONL line under an exclusive fcntl lock.
 
@@ -264,7 +283,7 @@ class JournalStore:
             elif t == "msg":
                 messages.append({
                     "role": entry["role"],
-                    "content": entry["content"],
+                    "content": tag_message_content(entry["content"], entry.get("task_id")),
                 })
         record_journal_replay(
             target="parent",
