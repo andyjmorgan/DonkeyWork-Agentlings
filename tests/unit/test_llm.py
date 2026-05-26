@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agentlings.core.llm import AnthropicLLMClient, MockLLMClient, create_llm_client
+from agentlings.core.llm import (
+    CONTEXT_ID_HEADER,
+    NAME_HEADER,
+    TASK_ID_HEADER,
+    AnthropicLLMClient,
+    MockLLMClient,
+    create_llm_client,
+)
 
 
 class TestMockLLMClient:
@@ -110,6 +117,92 @@ class TestAnthropicBatchResults:
         assert results[1].custom_id == "ctx-2"
         assert results[1].status == "failed"
         assert results[1].error == "rate limit"
+
+
+class TestContextIdHeader:
+    """The ``x-agentling-context-id`` header lets a backend correlate the
+    fan-out of Messages calls one task makes back to a single session.
+    """
+
+    def _stub_client(self) -> tuple[AnthropicLLMClient, AsyncMock]:
+        response = MagicMock()
+        response.content = []
+        response.stop_reason = "end_turn"
+        response.usage = None
+        create = AsyncMock(return_value=response)
+        mock_client = MagicMock()
+        mock_client.messages.create = create
+
+        client = AnthropicLLMClient.__new__(AnthropicLLMClient)
+        client._client = mock_client
+        client._model = "claude-sonnet-4-6"
+        client._max_tokens = 128
+        return client, create
+
+    @pytest.mark.asyncio
+    async def test_context_and_task_id_forwarded_as_headers(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(
+            system=[], messages=[], tools=[],
+            context_id="ctx-abc", task_id="task-123",
+        )
+
+        create.assert_awaited_once()
+        extra_headers = create.await_args.kwargs["extra_headers"]
+        assert extra_headers == {
+            CONTEXT_ID_HEADER: "ctx-abc",
+            TASK_ID_HEADER: "task-123",
+        }
+
+    @pytest.mark.asyncio
+    async def test_only_provided_ids_become_headers(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(system=[], messages=[], tools=[], task_id="task-only")
+
+        extra_headers = create.await_args.kwargs["extra_headers"]
+        assert extra_headers == {TASK_ID_HEADER: "task-only"}
+
+    @pytest.mark.asyncio
+    async def test_no_header_when_ids_absent(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(system=[], messages=[], tools=[])
+
+        assert "extra_headers" not in create.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_mock_records_last_context_and_task_id(self) -> None:
+        client = MockLLMClient()
+        await client.complete(
+            system=[],
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=[],
+            context_id="ctx-xyz",
+            task_id="task-xyz",
+        )
+        assert client.last_context_id == "ctx-xyz"
+        assert client.last_task_id == "task-xyz"
+
+
+class TestNameHeader:
+    """The static ``x-agentling-name`` header is baked into the client's
+    default headers once, so every request attributes traffic to the agentling
+    without per-call threading.
+    """
+
+    def test_name_set_as_default_header(self) -> None:
+        client = create_llm_client(
+            backend="anthropic", api_key="sk-test", agent_name="office-k3s",
+        )
+        assert isinstance(client, AnthropicLLMClient)
+        assert client._client.default_headers[NAME_HEADER] == "office-k3s"
+
+    def test_no_name_header_when_unset(self) -> None:
+        client = create_llm_client(backend="anthropic", api_key="sk-test")
+        assert isinstance(client, AnthropicLLMClient)
+        assert NAME_HEADER not in client._client.default_headers
 
 
 class TestFactory:

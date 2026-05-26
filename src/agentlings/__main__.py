@@ -226,6 +226,7 @@ def _sleep_command(date_str: str | None) -> None:
         model=config.agent_model,
         max_tokens=config.agent_max_tokens,
         base_url=config.anthropic_base_url,
+        agent_name=config.agent_name if config.definition.send_name_header else None,
     )
 
     cycle = SleepCycle(

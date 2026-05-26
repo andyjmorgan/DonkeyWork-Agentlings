@@ -96,6 +96,8 @@ async def run_completion(
     tools: ToolRegistry,
     turn_callback: Callable[[CompletionTurn], Awaitable[None]] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    context_id: str | None = None,
+    task_id: str | None = None,
 ) -> CompletionResult:
     """Run the LLM in a loop, executing tool calls until a terminal text response.
 
@@ -116,6 +118,10 @@ async def run_completion(
             ``CancellationRequested`` is raised and all partial progress so
             far is available in ``CompletionResult`` via a raised exception
             attribute.
+        context_id: The conversation this cycle belongs to. Forwarded to every
+            ``llm.complete`` call so each request carries the session header.
+        task_id: The task execution this cycle belongs to. Forwarded to every
+            ``llm.complete`` call so each request carries the task header.
 
     Returns:
         The final response content and all intermediate responses.
@@ -166,7 +172,10 @@ async def run_completion(
             turn_number = len(turns) + 1
 
             with otel_span("agentling.completion.llm_call", {"completion.turn": turn_number}) as llm_span:
-                response = await llm.complete(system, messages, tool_schemas)
+                response = await llm.complete(
+                    system, messages, tool_schemas,
+                    context_id=context_id, task_id=task_id,
+                )
                 _accumulate_usage(response)
                 usage = response.usage or {}
                 llm_span.set_attribute("llm.input_tokens", int(usage.get("input_tokens", 0) or 0))

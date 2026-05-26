@@ -115,6 +115,11 @@ class AgentDefinition(BaseModel):
             to read journals and conversation logs. Set to ``False`` for
             agents without filesystem tools or when the prompt budget is
             tight (e.g. small local models).
+        send_name_header: When ``True`` (default), send the agentling's ``name``
+            as the ``x-agentling-name`` header on every LLM request so a
+            deployment can attribute upstream traffic to a specific agentling.
+            Set to ``False`` to omit it (e.g. when a shared proxy injects its
+            own identity header).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -126,6 +131,7 @@ class AgentDefinition(BaseModel):
     system_prompt: str | None = None
     bash_timeout: int = Field(ge=1, default=30)
     data_dir_awareness: bool = True
+    send_name_header: bool = True
     memory: MemoryConfig | None = None
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None

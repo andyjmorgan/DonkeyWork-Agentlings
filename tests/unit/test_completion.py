@@ -65,6 +65,9 @@ class _OneShotToolLLM(MockLLMClient):
         system: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_schema: dict[str, Any] | None = None,
+        context_id: str | None = None,
+        task_id: str | None = None,
     ) -> LLMResponse:
         if not self._called:
             self._called = True
@@ -111,6 +114,26 @@ class TestRunCompletion:
         original_len = len(messages)
         await run_completion(llm, [], messages, tools)
         assert len(messages) > original_len
+
+    async def test_context_and_task_id_forwarded_to_every_turn(self, tools: ToolRegistry) -> None:
+        """A multi-turn cycle must stamp the session + task headers on each LLM call."""
+
+        class _RecordingLLM(MockLLMClient):
+            def __init__(self) -> None:
+                super().__init__(tool_names=["bash"])
+                self.seen: list[tuple[str | None, str | None]] = []
+
+            async def complete(self, system, messages, tools, output_schema=None, context_id=None, task_id=None):  # noqa: ANN001
+                self.seen.append((context_id, task_id))
+                return await super().complete(
+                    system, messages, tools, output_schema, context_id, task_id,
+                )
+
+        llm = _RecordingLLM()
+        messages = [{"role": "user", "content": [{"type": "text", "text": "run bash please"}]}]
+        await run_completion(llm, [], messages, tools, context_id="ctx-123", task_id="task-abc")
+        assert len(llm.seen) >= 2
+        assert all(seen == ("ctx-123", "task-abc") for seen in llm.seen)
 
 
 # ---------------------------------------------------------------------------

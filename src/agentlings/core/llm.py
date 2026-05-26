@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 BATCH_MAX_REQUESTS = 100_000
 
+# Headers stamped on every per-context LLM request so backends and proxies can
+# correlate a sequence of Messages calls back to a single agentling session
+# (context) and the specific task execution that fanned them out. The name
+# header is static for the process and is set once as a default header on the
+# client, rather than threaded per request.
+CONTEXT_ID_HEADER = "x-agentling-context-id"
+TASK_ID_HEADER = "x-agentling-task-id"
+NAME_HEADER = "x-agentling-name"
+
 # Matches ``delay-<seconds>`` in mock user messages — used by integration
 # tests to produce genuinely slow responses without global configuration.
 # Example: ``"delay-5 please answer"`` sleeps 5 seconds before responding.
@@ -108,6 +117,8 @@ class BaseLLMClient(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         output_schema: dict[str, Any] | None = None,
+        context_id: str | None = None,
+        task_id: str | None = None,
     ) -> LLMResponse:
         """Send a completion request and return the full response.
 
@@ -117,6 +128,13 @@ class BaseLLMClient(ABC):
             tools: Tool schemas available to the model.
             output_schema: JSON Schema for structured output. When provided,
                 the model is constrained to return valid JSON matching this schema.
+            context_id: The conversation this request belongs to. When set, it is
+                forwarded as the ``x-agentling-context-id`` request header so a
+                session can be tracked across the multiple Messages calls one task
+                fans out into.
+            task_id: The task execution this request belongs to. When set, it is
+                forwarded as the ``x-agentling-task-id`` request header so a single
+                task's Messages calls can be isolated within a session.
 
         Returns:
             The model's response content and stop reason.
@@ -209,15 +227,21 @@ class AnthropicLLMClient(BaseLLMClient):
         model: str,
         max_tokens: int,
         base_url: str | None = None,
+        agent_name: str | None = None,
     ) -> None:
         import anthropic
 
         client_kwargs: dict[str, Any] = {"api_key": api_key or "unset"}
         if base_url:
             client_kwargs["base_url"] = base_url
+        # The agentling name is constant for the process, so bake it into the
+        # client's default headers once rather than passing it on every call.
+        if agent_name:
+            client_kwargs["default_headers"] = {NAME_HEADER: agent_name}
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
         self._model = model
         self._max_tokens = max_tokens
+        self._agent_name = agent_name
 
     async def complete(
         self,
@@ -225,6 +249,8 @@ class AnthropicLLMClient(BaseLLMClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         output_schema: dict[str, Any] | None = None,
+        context_id: str | None = None,
+        task_id: str | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -241,6 +267,13 @@ class AnthropicLLMClient(BaseLLMClient):
                     "schema": output_schema,
                 }
             }
+        extra_headers: dict[str, str] = {}
+        if context_id:
+            extra_headers[CONTEXT_ID_HEADER] = context_id
+        if task_id:
+            extra_headers[TASK_ID_HEADER] = task_id
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
 
         with otel_span("agentling.llm.complete", {
             "llm.backend": "anthropic",
@@ -249,6 +282,8 @@ class AnthropicLLMClient(BaseLLMClient):
             "llm.message_count": len(messages),
             "llm.tool_count": len(tools or []),
             "llm.has_output_schema": bool(output_schema),
+            "llm.context_id": context_id or "",
+            "llm.task_id": task_id or "",
         }) as span:
             start = time.monotonic()
             response = await self._client.messages.create(**kwargs)
@@ -420,6 +455,8 @@ class MockLLMClient(BaseLLMClient):
         self._compaction_threshold = compaction_threshold
         self._call_count = 0
         self._batch_store: dict[str, list[BatchRequest]] = {}
+        self.last_context_id: str | None = None
+        self.last_task_id: str | None = None
 
     async def complete(
         self,
@@ -427,8 +464,12 @@ class MockLLMClient(BaseLLMClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         output_schema: dict[str, Any] | None = None,
+        context_id: str | None = None,
+        task_id: str | None = None,
     ) -> LLMResponse:
         self._call_count += 1
+        self.last_context_id = context_id
+        self.last_task_id = task_id
         last_message = messages[-1] if messages else {}
         last_text = _extract_text(last_message)
 
@@ -453,6 +494,8 @@ class MockLLMClient(BaseLLMClient):
             "llm.model": self.MOCK_MODEL,
             "llm.message_count": len(messages),
             "llm.tool_count": len(tools or []),
+            "llm.context_id": context_id or "",
+            "llm.task_id": task_id or "",
         }) as span:
             if last_message.get("role") == "tool":
                 response = LLMResponse(
@@ -547,6 +590,7 @@ def create_llm_client(
     max_tokens: int = 4096,
     tool_names: list[str] | None = None,
     base_url: str | None = None,
+    agent_name: str | None = None,
 ) -> BaseLLMClient:
     """Factory that returns the appropriate LLM client for the given backend.
 
@@ -560,6 +604,9 @@ def create_llm_client(
         tool_names: Tool names the mock backend should recognize.
         base_url: Optional override for the Anthropic Messages endpoint.
             When set, the client talks to that URL instead of api.anthropic.com.
+        agent_name: When set, sent as the ``x-agentling-name`` default header on
+            every request so a deployment can attribute LLM traffic to a specific
+            agentling. Ignored by the mock backend (it makes no HTTP calls).
 
     Returns:
         A configured LLM client instance.
@@ -573,7 +620,11 @@ def create_llm_client(
     else:
         logger.info("using Anthropic LLM backend (model=%s)", model)
     return AnthropicLLMClient(
-        api_key=api_key, model=model, max_tokens=max_tokens, base_url=base_url,
+        api_key=api_key,
+        model=model,
+        max_tokens=max_tokens,
+        base_url=base_url,
+        agent_name=agent_name,
     )
 
 
