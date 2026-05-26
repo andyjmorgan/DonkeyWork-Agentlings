@@ -170,6 +170,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         max_tokens=config.agent_max_tokens,
         tool_names=tools.tool_names(),
         base_url=config.anthropic_base_url,
+        agent_name=config.agent_name if config.definition.send_name_header else None,
     )
 
     skills = discover_skills(config.skills_dir) if config.skills_dir else []

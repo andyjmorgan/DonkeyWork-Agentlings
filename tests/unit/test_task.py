@@ -77,7 +77,7 @@ class ControllableLLM(BaseLLMClient):
     def push_exception(self, exc: Exception) -> None:
         self._queue.put_nowait(exc)
 
-    async def complete(self, system, messages, tools, output_schema=None) -> LLMResponse:  # noqa: ANN001
+    async def complete(self, system, messages, tools, output_schema=None, context_id=None, task_id=None) -> LLMResponse:  # noqa: ANN001
         self.call_count += 1
         self.before_call_event.set()
         item = await self._queue.get()
@@ -269,7 +269,7 @@ class TestCurrentMessageTagging:
         captured: list[list[dict[str, Any]]] = []
 
         class CapturingLLM(ControllableLLM):
-            async def complete(self, system, messages, tools, output_schema=None):  # noqa: ANN001
+            async def complete(self, system, messages, tools, output_schema=None, context_id=None, task_id=None):  # noqa: ANN001
                 captured.append([dict(m) for m in messages])
                 return await super().complete(system, messages, tools, output_schema)
 
@@ -300,7 +300,7 @@ class TestCurrentMessageTagging:
         captured: list[list[dict[str, Any]]] = []
 
         class CapturingLLM(ControllableLLM):
-            async def complete(self, system, messages, tools, output_schema=None):  # noqa: ANN001
+            async def complete(self, system, messages, tools, output_schema=None, context_id=None, task_id=None):  # noqa: ANN001
                 captured.append([dict(m) for m in messages])
                 return await super().complete(system, messages, tools, output_schema)
 
