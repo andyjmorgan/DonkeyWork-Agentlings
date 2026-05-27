@@ -196,3 +196,57 @@ class TestFullCycle:
         cycle, _, memory, _ = sleep_deps
         await cycle.run()
         assert memory.list() == []
+
+
+class _ResultsFailLLM(MockLLMClient):
+    """Batch completes (status=ended) but fetching results always fails.
+
+    Reproduces the sluice ``results_url`` failure: the batch object's
+    ``results_url`` points at ``api.anthropic.com`` (the real upstream), so the
+    SDK follows it directly, bypassing the gateway, and is rejected with a 401
+    ``invalid x-api-key``. The retrieval call raises; the cycle must not.
+    """
+
+    async def batch_results(self, batch_id: str):
+        raise RuntimeError("401 Unauthorized: invalid x-api-key")
+
+
+class TestBatchResultsResilience:
+    """A failure retrieving batch results must degrade gracefully rather than
+    abort the cycle (regression: the run aborted on the results 401)."""
+
+    async def test_poll_batch_swallows_results_failure(
+        self, sleep_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        store = JournalStore(tmp_data_dir)
+        memory = MemoryFileStore(tmp_data_dir)
+        llm = _ResultsFailLLM(tool_names=[])
+        cycle = SleepCycle(config=sleep_config, llm=llm, memory_store=memory, store=store)
+
+        # batch_status reports "ended", so _poll_batch takes the results path
+        # where batch_results raises. It must degrade to [] rather than propagate.
+        results = await cycle._poll_batch("mock_batch_x")
+        assert results == []
+
+    async def test_run_completes_when_results_fetch_fails(
+        self, sleep_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        store = JournalStore(tmp_data_dir)
+        memory = MemoryFileStore(tmp_data_dir)
+        llm = _ResultsFailLLM(tool_names=[])
+        cycle = SleepCycle(config=sleep_config, llm=llm, memory_store=memory, store=store)
+
+        # One conversation in the review window so deep_sleep submits a batch.
+        store.create("ctx-1")
+        store.append("ctx-1", MessageEntry(
+            ctx="ctx-1", role="user",
+            content=[{"type": "text", "text": "hello agent"}],
+        ))
+        path = tmp_data_dir / "ctx-1" / "journal.jsonl"
+        yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
+        import os
+        os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
+
+        # Must complete without raising; with no results, memory stays untouched.
+        await cycle.run()
+        assert memory.list() == []

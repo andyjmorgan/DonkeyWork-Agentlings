@@ -339,7 +339,7 @@ class SleepCycle:
         while time.monotonic() < deadline:
             status = await self._llm.batch_status(batch_id)
             if status.processing_status == "ended":
-                return await self._llm.batch_results(batch_id)
+                return await self._fetch_results(batch_id)
             logger.debug(
                 "[SLEEP:DEEP] Batch %s: %s (next poll in %.0fs)",
                 batch_id, status.processing_status, interval,
@@ -348,9 +348,25 @@ class SleepCycle:
             interval = min(interval * 2, max_interval)
 
         logger.warning("[SLEEP:DEEP] Batch %s timed out after %.0fs", batch_id, timeout)
+        return await self._fetch_results(batch_id)
+
+    async def _fetch_results(self, batch_id: str) -> list[Any]:
+        """Retrieve batch results, degrading to ``[]`` on any failure.
+
+        A failure here must not abort the sleep cycle. The known case is the
+        gateway handing back a ``results_url`` that points straight at the
+        upstream API (bypassing the gateway's auth), so the SDK's results fetch
+        401s — but any transient error is treated the same way. We log loudly
+        and skip this batch's summaries so the run can still consolidate memory
+        and run housekeeping rather than crashing.
+        """
         try:
             return await self._llm.batch_results(batch_id)
         except Exception:
+            logger.exception(
+                "[SLEEP:DEEP] Failed to retrieve results for batch %s; "
+                "skipping this batch", batch_id,
+            )
             return []
 
     def _write_journal(self, date_str: str, content: str) -> None:
