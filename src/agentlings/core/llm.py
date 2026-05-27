@@ -119,6 +119,7 @@ class BaseLLMClient(ABC):
         output_schema: dict[str, Any] | None = None,
         context_id: str | None = None,
         task_id: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         """Send a completion request and return the full response.
 
@@ -251,10 +252,12 @@ class AnthropicLLMClient(BaseLLMClient):
         output_schema: dict[str, Any] | None = None,
         context_id: str | None = None,
         task_id: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
+        effective_max_tokens = max_tokens if max_tokens is not None else self._max_tokens
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": effective_max_tokens,
             "system": system,
             "messages": messages,
         }
@@ -278,7 +281,7 @@ class AnthropicLLMClient(BaseLLMClient):
         with otel_span("agentling.llm.complete", {
             "llm.backend": "anthropic",
             "llm.model": self._model,
-            "llm.max_tokens": self._max_tokens,
+            "llm.max_tokens": effective_max_tokens,
             "llm.message_count": len(messages),
             "llm.tool_count": len(tools or []),
             "llm.has_output_schema": bool(output_schema),
@@ -457,6 +460,7 @@ class MockLLMClient(BaseLLMClient):
         self._batch_store: dict[str, list[BatchRequest]] = {}
         self.last_context_id: str | None = None
         self.last_task_id: str | None = None
+        self.last_max_tokens: int | None = None
 
     async def complete(
         self,
@@ -466,10 +470,12 @@ class MockLLMClient(BaseLLMClient):
         output_schema: dict[str, Any] | None = None,
         context_id: str | None = None,
         task_id: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         self._call_count += 1
         self.last_context_id = context_id
         self.last_task_id = task_id
+        self.last_max_tokens = max_tokens
         last_message = messages[-1] if messages else {}
         last_text = _extract_text(last_message)
 

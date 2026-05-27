@@ -49,6 +49,10 @@ class SleepConfig(BaseModel):
         model: Model override for sleep LLM calls (``None`` uses agent default).
         summary_prompt: Override for the per-conversation summary prompt.
         consolidation_prompt: Override for the REM consolidation prompt.
+        consolidation_max_tokens: Output token budget for the REM consolidation
+            call. Must be large enough to re-emit the entire memory (up to
+            ``memory_max_entries`` entries) as JSON; the per-turn agent default
+            (4096) truncates the response and the consolidation is dropped.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -61,6 +65,7 @@ class SleepConfig(BaseModel):
     model: str | None = None
     summary_prompt: str | None = None
     consolidation_prompt: str | None = None
+    consolidation_max_tokens: int = 16384
 
 
 class TelemetryConfig(BaseModel):
