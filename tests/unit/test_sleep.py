@@ -250,3 +250,27 @@ class TestBatchResultsResilience:
         # Must complete without raising; with no results, memory stays untouched.
         await cycle.run()
         assert memory.list() == []
+
+
+class TestRemTokenBudget:
+    """REM consolidation must request enough output tokens to re-emit the full
+    memory. The 4096 default truncated the JSON mid-entry and the parse failed,
+    silently dropping the consolidation (regression)."""
+
+    async def test_rem_requests_consolidation_max_tokens(
+        self, sleep_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        store = JournalStore(tmp_data_dir)
+        memory = MemoryFileStore(tmp_data_dir)
+        llm = MockLLMClient(tool_names=[])
+        cycle = SleepCycle(config=sleep_config, llm=llm, memory_store=memory, store=store)
+
+        await cycle._rem(
+            summaries=["### ctx-1\na summary"], candidates=[], date_str="2026-05-26"
+        )
+
+        budget = (sleep_config.sleep_config or SleepConfig()).consolidation_max_tokens
+        assert budget >= 16384, "consolidation budget must be well above the 4096 default"
+        assert llm.last_max_tokens == budget, (
+            "REM must request the configured consolidation_max_tokens, not the default"
+        )
