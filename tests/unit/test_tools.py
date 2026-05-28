@@ -276,7 +276,7 @@ class TestBashTimeout:
     def test_build_builtin_registry_default(self) -> None:
         reg = build_builtin_registry()
         assert "bash" in reg
-        assert "30" in reg["bash"]["input_schema"]["properties"]["timeout"]["description"]
+        assert "50" in reg["bash"]["input_schema"]["properties"]["timeout"]["description"]
 
     def test_build_builtin_registry_custom(self) -> None:
         reg = build_builtin_registry(bash_timeout=90)

@@ -11,11 +11,95 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
+from agentlings.config import INTERLEAVED_THINKING_BETA, ThinkingConfig
 from agentlings.core.telemetry import otel_span, record_llm_usage
 
 logger = logging.getLogger(__name__)
 
 BATCH_MAX_REQUESTS = 100_000
+
+# Anthropic-beta header name. Stacks comma-separated values when multiple
+# beta features are active on the same request.
+ANTHROPIC_BETA_HEADER = "anthropic-beta"
+
+
+def _build_thinking_kwargs(
+    thinking: ThinkingConfig | None,
+    max_tokens: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Translate a ThinkingConfig into Anthropic Messages API kwargs.
+
+    Returns ``(thinking_block, output_config_addition, beta_header)`` where:
+
+    * ``thinking_block`` is the value for the ``thinking`` parameter, or
+      ``None`` when no block should be sent.
+    * ``output_config_addition`` is an ``output_config`` sub-dict to merge
+      (currently only carries ``effort`` in adaptive mode), or ``None``.
+    * ``beta_header`` is the value for the ``anthropic-beta`` header, or
+      ``None``. Caller is responsible for merging it with any other beta
+      values it may already be sending.
+
+    Budget mode self-protects: if ``budget_tokens`` would equal or exceed
+    ``max_tokens`` and interleaved mode is off (where the budget can
+    legally exceed max_tokens), the block is dropped and a warning is
+    logged. The conversation continues without thinking rather than 400-ing.
+    """
+    if thinking is None or thinking.mode == "off":
+        return None, None, None
+
+    if thinking.mode == "budget":
+        if not thinking.interleaved and thinking.budget_tokens >= max_tokens:
+            logger.warning(
+                "thinking.budget_tokens (%d) >= max_tokens (%d); "
+                "skipping thinking block for this call",
+                thinking.budget_tokens, max_tokens,
+            )
+            return None, None, None
+        block = {"type": "enabled", "budget_tokens": thinking.budget_tokens}
+        beta = INTERLEAVED_THINKING_BETA if thinking.interleaved else None
+        return block, None, beta
+
+    # adaptive
+    block: dict[str, Any] = {"type": "adaptive"}
+    if thinking.display is not None:
+        block["display"] = thinking.display
+    output_addition = {"effort": thinking.effort} if thinking.effort is not None else None
+    return block, output_addition, None
+
+
+# Crude model-family heuristics for the startup mismatch warning. The
+# matching is loose on purpose — Anthropic ships new models faster than
+# we can hardcode them, so we only flag the loudest known incompatibilities.
+_ADAPTIVE_ONLY_MODELS = ("claude-opus-4-7", "claude-opus-4-8", "claude-mythos")
+_LEGACY_BUDGET_MODELS = (
+    "claude-sonnet-3-7",
+    "claude-sonnet-4-",  # 4.0 / 4.1 / 4.5 (4.6+ accept budget but deprecated)
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-5",
+    "claude-haiku-4-5",
+)
+
+
+def _warn_if_mode_mismatches_model(mode: str, model: str) -> None:
+    """Log a warning if the configured thinking mode is unlikely to work on the model.
+
+    Not a hard rejection — users routinely swap models without re-validating
+    YAML. A clear warning at startup is friendlier than a mysterious 400 on
+    the first call, but failing the daemon over a heuristic would be worse.
+    """
+    if mode == "budget" and any(model.startswith(m) for m in _ADAPTIVE_ONLY_MODELS):
+        logger.warning(
+            "thinking.mode='budget' on model %s — this model rejects "
+            "the legacy thinking shape with HTTP 400; switch to 'adaptive'",
+            model,
+        )
+    elif mode == "adaptive" and any(model.startswith(m) for m in _LEGACY_BUDGET_MODELS):
+        logger.warning(
+            "thinking.mode='adaptive' on model %s — this model does not "
+            "support adaptive thinking; switch to 'budget' or 'off'",
+            model,
+        )
 
 # Headers stamped on every per-context LLM request so backends and proxies can
 # correlate a sequence of Messages calls back to a single agentling session
@@ -229,6 +313,7 @@ class AnthropicLLMClient(BaseLLMClient):
         max_tokens: int,
         base_url: str | None = None,
         agent_name: str | None = None,
+        thinking: ThinkingConfig | None = None,
     ) -> None:
         import anthropic
 
@@ -243,6 +328,9 @@ class AnthropicLLMClient(BaseLLMClient):
         self._model = model
         self._max_tokens = max_tokens
         self._agent_name = agent_name
+        self._thinking = thinking if thinking is not None and thinking.mode != "off" else None
+        if self._thinking is not None:
+            _warn_if_mode_mismatches_model(self._thinking.mode, model)
 
     async def complete(
         self,
@@ -263,18 +351,29 @@ class AnthropicLLMClient(BaseLLMClient):
         }
         if tools:
             kwargs["tools"] = tools
+        output_config: dict[str, Any] = {}
         if output_schema:
-            kwargs["output_config"] = {
-                "format": {
-                    "type": "json_schema",
-                    "schema": output_schema,
-                }
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": output_schema,
             }
+        # __new__ stubs in tests bypass __init__, so _thinking may be unset.
+        thinking_block, output_addition, beta_header = _build_thinking_kwargs(
+            getattr(self, "_thinking", None), effective_max_tokens,
+        )
+        if thinking_block is not None:
+            kwargs["thinking"] = thinking_block
+        if output_addition:
+            output_config.update(output_addition)
+        if output_config:
+            kwargs["output_config"] = output_config
         extra_headers: dict[str, str] = {}
         if context_id:
             extra_headers[CONTEXT_ID_HEADER] = context_id
         if task_id:
             extra_headers[TASK_ID_HEADER] = task_id
+        if beta_header:
+            extra_headers[ANTHROPIC_BETA_HEADER] = beta_header
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
 
@@ -346,6 +445,7 @@ class AnthropicLLMClient(BaseLLMClient):
             "llm.model": use_model,
             "llm.batch.request_count": len(requests),
         }) as span:
+            thinking_cfg = getattr(self, "_thinking", None)
             for i in range(0, len(requests), BATCH_MAX_REQUESTS):
                 chunk = requests[i : i + BATCH_MAX_REQUESTS]
                 api_requests = []
@@ -356,13 +456,26 @@ class AnthropicLLMClient(BaseLLMClient):
                         "system": req.system,
                         "messages": req.messages,
                     }
+                    output_config: dict[str, Any] = {}
                     if req.output_schema:
-                        params["output_config"] = {
-                            "format": {
-                                "type": "json_schema",
-                                "schema": req.output_schema,
-                            }
+                        output_config["format"] = {
+                            "type": "json_schema",
+                            "schema": req.output_schema,
                         }
+                    thinking_block, output_addition, _beta = _build_thinking_kwargs(
+                        thinking_cfg, req.max_tokens,
+                    )
+                    # batch_create cannot send a per-request beta header, so
+                    # interleaved thinking is incompatible with budget-mode
+                    # batches on older models. The block itself is still sent;
+                    # the lack of header means interleaving is off for older
+                    # models, but the call still succeeds.
+                    if thinking_block is not None:
+                        params["thinking"] = thinking_block
+                    if output_addition:
+                        output_config.update(output_addition)
+                    if output_config:
+                        params["output_config"] = output_config
                     api_requests.append(
                         Request(
                             custom_id=req.custom_id,
@@ -453,6 +566,7 @@ class MockLLMClient(BaseLLMClient):
         self,
         tool_names: list[str] | None = None,
         compaction_threshold: int = 10,
+        thinking: ThinkingConfig | None = None,
     ) -> None:
         self._tool_names = tool_names or []
         self._compaction_threshold = compaction_threshold
@@ -461,6 +575,11 @@ class MockLLMClient(BaseLLMClient):
         self.last_context_id: str | None = None
         self.last_task_id: str | None = None
         self.last_max_tokens: int | None = None
+        # Record the thinking config so tests can assert it was threaded
+        # through the factory. The mock backend ignores it for behavior.
+        self.thinking_config: ThinkingConfig | None = (
+            thinking if thinking is not None and thinking.mode != "off" else None
+        )
 
     async def complete(
         self,
@@ -597,6 +716,7 @@ def create_llm_client(
     tool_names: list[str] | None = None,
     base_url: str | None = None,
     agent_name: str | None = None,
+    thinking: ThinkingConfig | None = None,
 ) -> BaseLLMClient:
     """Factory that returns the appropriate LLM client for the given backend.
 
@@ -619,18 +739,27 @@ def create_llm_client(
     """
     if backend == "mock":
         logger.info("using mock LLM backend")
-        return MockLLMClient(tool_names=tool_names)
+        return MockLLMClient(tool_names=tool_names, thinking=thinking)
 
     if base_url:
         logger.info("using Anthropic-compatible LLM backend (model=%s, base_url=%s)", model, base_url)
     else:
         logger.info("using Anthropic LLM backend (model=%s)", model)
+    if thinking is not None and thinking.mode != "off":
+        logger.info(
+            "extended thinking enabled: mode=%s%s%s%s",
+            thinking.mode,
+            f", effort={thinking.effort}" if thinking.effort else "",
+            f", budget_tokens={thinking.budget_tokens}" if thinking.mode == "budget" else "",
+            ", interleaved=true" if thinking.interleaved else "",
+        )
     return AnthropicLLMClient(
         api_key=api_key,
         model=model,
         max_tokens=max_tokens,
         base_url=base_url,
         agent_name=agent_name,
+        thinking=thinking,
     )
 
 

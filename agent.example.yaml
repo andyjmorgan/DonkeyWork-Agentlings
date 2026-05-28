@@ -34,6 +34,24 @@ sleep:
   # summary_prompt: null    # override per-conversation summary prompt
   # consolidation_prompt: null  # override REM consolidation prompt
 
+thinking:
+  # Extended thinking. Off by default.
+  #
+  # mode: "off" (default) — no thinking block sent.
+  # mode: "adaptive" — Opus 4.6+ / Sonnet 4.6+ shape. The model picks
+  #   its own thinking budget; control depth with `effort`. Interleaved
+  #   thinking between tool calls is automatic in this mode.
+  # mode: "budget" — legacy shape, supported on Sonnet 3.7,
+  #   Sonnet 4 / 4.5, Opus 4 / 4.1 / 4.5, and Haiku 4.5. Set
+  #   `interleaved: true` to think between tool calls (requires the
+  #   model to support the interleaved-thinking-2025-05-14 beta;
+  #   Haiku 4.5 does NOT).
+  mode: "off"
+  # effort: "medium"     # adaptive only: low | medium | high | xhigh | max
+  # display: "summarized"  # adaptive only: opts back into summarized thinking content on Opus 4.7+
+  # budget_tokens: 8192    # budget only: must be >= 1024 (and < max_tokens unless interleaved)
+  # interleaved: false     # budget only: adds the interleaved-thinking-2025-05-14 beta header
+
 telemetry:
   # Off by default. When enabled, the agent emits OTLP traces + metrics
   # for every HTTP request, protocol call, task, LLM call, tool, and

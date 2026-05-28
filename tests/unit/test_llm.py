@@ -6,12 +6,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agentlings.config import INTERLEAVED_THINKING_BETA, ThinkingConfig
 from agentlings.core.llm import (
+    ANTHROPIC_BETA_HEADER,
     CONTEXT_ID_HEADER,
     NAME_HEADER,
     TASK_ID_HEADER,
     AnthropicLLMClient,
     MockLLMClient,
+    _build_thinking_kwargs,
     create_llm_client,
 )
 
@@ -247,6 +250,149 @@ class TestFactory:
             base_url="http://localhost:11434",
         )
         assert client._client.api_key == "unset"
+
+
+class TestThinkingHelper:
+    """``_build_thinking_kwargs`` translates ThinkingConfig → API kwargs.
+
+    These cover the three modes plus the budget>=max_tokens self-protection
+    path, without booting an HTTP client.
+    """
+
+    def test_off_returns_none_triple(self) -> None:
+        block, output, beta = _build_thinking_kwargs(None, max_tokens=4096)
+        assert (block, output, beta) == (None, None, None)
+        block, output, beta = _build_thinking_kwargs(
+            ThinkingConfig(mode="off"), max_tokens=4096,
+        )
+        assert (block, output, beta) == (None, None, None)
+
+    def test_budget_mode_emits_enabled_block(self) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=2048)
+        block, output, beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "enabled", "budget_tokens": 2048}
+        assert output is None
+        assert beta is None
+
+    def test_budget_mode_interleaved_adds_beta_header(self) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=2048, interleaved=True)
+        block, _output, beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "enabled", "budget_tokens": 2048}
+        assert beta == INTERLEAVED_THINKING_BETA
+
+    def test_budget_over_max_tokens_drops_block(self, caplog: pytest.LogCaptureFixture) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=8192)
+        with caplog.at_level("WARNING"):
+            block, _output, _beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block is None
+        assert any("budget_tokens" in r.message for r in caplog.records)
+
+    def test_interleaved_budget_may_exceed_max_tokens(self) -> None:
+        # With interleaved, the budget is a per-turn total across all
+        # thinking blocks and may legally exceed max_tokens.
+        cfg = ThinkingConfig(mode="budget", budget_tokens=8192, interleaved=True)
+        block, _output, beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "enabled", "budget_tokens": 8192}
+        assert beta == INTERLEAVED_THINKING_BETA
+
+    def test_adaptive_mode_emits_adaptive_block_with_effort(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", effort="medium")
+        block, output, beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "adaptive"}
+        assert output == {"effort": "medium"}
+        assert beta is None
+
+    def test_adaptive_mode_emits_display(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", display="summarized", effort="low")
+        block, _output, _beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "adaptive", "display": "summarized"}
+
+    def test_adaptive_without_effort_omits_output_addition(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive")
+        block, output, _beta = _build_thinking_kwargs(cfg, max_tokens=4096)
+        assert block == {"type": "adaptive"}
+        assert output is None
+
+
+class TestAnthropicClientThinkingIntegration:
+    """The client surfaces thinking via the right kwargs + headers."""
+
+    def _stub_client(self, thinking: ThinkingConfig | None = None) -> tuple[AnthropicLLMClient, AsyncMock]:
+        response = MagicMock()
+        response.content = []
+        response.stop_reason = "end_turn"
+        response.usage = None
+        create = AsyncMock(return_value=response)
+        mock_client = MagicMock()
+        mock_client.messages.create = create
+        client = AnthropicLLMClient.__new__(AnthropicLLMClient)
+        client._client = mock_client
+        client._model = "claude-sonnet-4-6"
+        client._max_tokens = 4096
+        client._thinking = thinking
+        return client, create
+
+    @pytest.mark.asyncio
+    async def test_adaptive_thinking_appears_in_kwargs(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", effort="medium")
+        client, create = self._stub_client(thinking=cfg)
+        await client.complete(system=[], messages=[], tools=[])
+        kwargs = create.await_args.kwargs
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert "extra_headers" not in kwargs or ANTHROPIC_BETA_HEADER not in kwargs.get(
+            "extra_headers", {}
+        )
+
+    @pytest.mark.asyncio
+    async def test_budget_interleaved_emits_block_plus_beta_header(self) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=2048, interleaved=True)
+        client, create = self._stub_client(thinking=cfg)
+        await client.complete(system=[], messages=[], tools=[])
+        kwargs = create.await_args.kwargs
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+        assert kwargs["extra_headers"][ANTHROPIC_BETA_HEADER] == INTERLEAVED_THINKING_BETA
+
+    @pytest.mark.asyncio
+    async def test_no_thinking_when_unconfigured(self) -> None:
+        client, create = self._stub_client(thinking=None)
+        await client.complete(system=[], messages=[], tools=[])
+        kwargs = create.await_args.kwargs
+        assert "thinking" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_existing_output_schema_merges_with_effort(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", effort="high")
+        client, create = self._stub_client(thinking=cfg)
+        await client.complete(
+            system=[], messages=[], tools=[],
+            output_schema={"type": "object"},
+        )
+        oc = create.await_args.kwargs["output_config"]
+        assert oc["format"]["type"] == "json_schema"
+        assert oc["effort"] == "high"
+
+
+class TestThinkingFactory:
+    """The factory threads thinking through to whichever client it builds."""
+
+    def test_mock_backend_records_thinking(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", effort="medium")
+        client = create_llm_client(backend="mock", thinking=cfg)
+        assert isinstance(client, MockLLMClient)
+        assert client.thinking_config == cfg
+
+    def test_mock_backend_drops_off_mode(self) -> None:
+        client = create_llm_client(backend="mock", thinking=ThinkingConfig(mode="off"))
+        assert client.thinking_config is None  # type: ignore[union-attr]
+
+    def test_anthropic_backend_threads_thinking(self) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=2048)
+        client = create_llm_client(
+            backend="anthropic", api_key="k", model="claude-sonnet-4-5",
+            max_tokens=4096, thinking=cfg,
+        )
+        assert client._thinking == cfg  # type: ignore[union-attr]
 
 
 class TestMockLLMDelay:

@@ -9,7 +9,7 @@ from typing import Any
 
 from agentlings.tools.registry import ToolResult
 
-DEFAULT_TIMEOUT = 30
+DEFAULT_TIMEOUT = 50
 
 
 # ---------------------------------------------------------------------------
