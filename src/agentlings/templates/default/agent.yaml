@@ -39,3 +39,10 @@ memory:
 sleep:
   enabled: true
   schedule: "0 2 * * *"
+
+thinking:
+  # Extended thinking. Off by default. See README for the full mode/effort
+  # matrix per model family.
+  mode: "off"
+  # mode: "adaptive"
+  # effort: "medium"

@@ -535,6 +535,50 @@ A request flows top-to-bottom through this tree, parent → child:
 
 When telemetry is disabled (the default) or the OpenTelemetry packages are not installed, all instrumentation is a no-op — the cost is one function call per span/metric site.
 
+## Extended thinking
+
+Agentlings can be configured to let Claude do extended reasoning before its visible reply. Off by default. Three modes match the model-generation split that landed in Q1 2026:
+
+| Mode | When to use | YAML block |
+|------|-------------|------------|
+| `off` (default) | Non-Anthropic backends; cost-sensitive workloads | `thinking: { mode: "off" }` |
+| `adaptive` | Opus 4.6+, Sonnet 4.6+, Mythos Preview | `thinking: { mode: "adaptive", effort: "medium" }` |
+| `budget` | Sonnet 3.7 / 4 / 4.5, Opus 4 / 4.1 / 4.5, Haiku 4.5 | `thinking: { mode: "budget", budget_tokens: 4096, interleaved: true }` |
+
+### Adaptive mode (recommended on 4.6+)
+
+The model picks its own thinking budget per request. You control depth with the `effort` parameter (`low | medium | high | xhigh | max`). Interleaved thinking between tool calls is automatic — no flag needed. On Opus 4.7+ thinking content is hidden by default; set `display: "summarized"` to opt back in.
+
+```yaml
+thinking:
+  mode: adaptive
+  effort: medium
+  # display: summarized  # opt back into summarized thinking on Opus 4.7+
+```
+
+Required on Opus 4.7+. Recommended on Opus 4.6 and Sonnet 4.6 (where legacy `budget_tokens` is deprecated but still accepted).
+
+### Budget mode (legacy)
+
+Sets `thinking: {"type": "enabled", "budget_tokens": N}` on every Messages call. `budget_tokens` must be ≥ 1024 and (unless `interleaved: true`) less than `max_tokens`. Setting `interleaved: true` adds the `interleaved-thinking-2025-05-14` beta header so the model can think between tool calls; in that case the budget is a per-turn total and may exceed `max_tokens`.
+
+```yaml
+thinking:
+  mode: budget
+  budget_tokens: 4096
+  interleaved: true
+```
+
+Required on Sonnet 4 / 4.5, Opus 4 / 4.1 / 4.5, and Haiku 4.5 (which does not support interleaved). Rejected with HTTP 400 on Opus 4.7+.
+
+### Sleep cycle
+
+The sleep cycle's batch calls inherit the same thinking config. Interleaved thinking is silently dropped for batch calls (the batches API cannot carry a per-request beta header), but the thinking block itself is still sent.
+
+### Mock backend
+
+The mock backend ignores thinking for behaviour but records the config on the client (`MockLLMClient.thinking_config`) so tests can assert the wiring without an Anthropic key.
+
 ## Architecture
 
 ```mermaid

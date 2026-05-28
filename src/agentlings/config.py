@@ -68,6 +68,76 @@ class SleepConfig(BaseModel):
     consolidation_max_tokens: int = 16384
 
 
+ThinkingMode = Literal["off", "budget", "adaptive"]
+ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
+ThinkingDisplay = Literal["summarized"]
+
+INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
+
+
+class ThinkingConfig(BaseModel):
+    """Extended-thinking configuration for Anthropic models.
+
+    Three modes cover the model-generation split that landed in early 2026:
+
+    * ``mode: "off"`` (default) — no ``thinking`` block is attached. Use
+      this for non-Anthropic backends (Ollama) and for cost-sensitive
+      live calls.
+
+    * ``mode: "budget"`` — legacy shape, supported on Claude Sonnet 3.7,
+      Sonnet 4/4.5, Opus 4/4.1/4.5, and Haiku 4.5. Sends
+      ``thinking={"type": "enabled", "budget_tokens": N}``. Set
+      ``interleaved: true`` to add the ``interleaved-thinking-2025-05-14``
+      beta header (required on Opus 4-4.5 and Sonnet 4-4.5 to think
+      between tool calls; not supported on Haiku 4.5). Anthropic requires
+      ``budget_tokens >= 1024`` and ``< max_tokens`` (except when
+      ``interleaved: true``, where the budget is a per-turn total across
+      all thinking blocks and may exceed ``max_tokens``).
+
+    * ``mode: "adaptive"`` — the post-Sonnet-4.6 shape. Sends
+      ``thinking={"type": "adaptive"}`` and lets the model decide budget
+      per request. Required on Opus 4.7+ (legacy budget returns 400);
+      recommended on Sonnet 4.6 and Opus 4.6. Optional ``effort`` knob
+      (``low|medium|high|xhigh|max``) goes into ``output_config.effort``.
+      Optional ``display: "summarized"`` opts back into summarized
+      thinking content on Opus 4.7+ (default is empty thinking blocks).
+      Interleaved thinking is automatic in this mode — no flag needed.
+
+    A ``model_validator`` rejects combinations that the API would reject
+    (e.g. ``effort`` set when ``mode != "adaptive"``). The LLM client logs
+    a warning at construction if the configured mode looks wrong for the
+    active model, but does not refuse — the user may swap models without
+    re-validating YAML, and a clear log line is better than a startup
+    crash.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: ThinkingMode = "off"
+    budget_tokens: int = Field(ge=1024, default=8192)
+    interleaved: bool = False
+    effort: ThinkingEffort | None = None
+    display: ThinkingDisplay | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode_fields(self) -> "ThinkingConfig":
+        if self.mode != "adaptive":
+            if self.effort is not None:
+                raise ValueError(
+                    "thinking.effort is only valid when thinking.mode == 'adaptive'"
+                )
+            if self.display is not None:
+                raise ValueError(
+                    "thinking.display is only valid when thinking.mode == 'adaptive'"
+                )
+        if self.mode != "budget" and self.interleaved:
+            raise ValueError(
+                "thinking.interleaved is only valid when thinking.mode == 'budget' "
+                "(interleaved thinking is implicit on adaptive mode)"
+            )
+        return self
+
+
 class TelemetryConfig(BaseModel):
     """OpenTelemetry configuration.
 
@@ -134,12 +204,13 @@ class AgentDefinition(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[SkillConfig] = Field(default_factory=list)
     system_prompt: str | None = None
-    bash_timeout: int = Field(ge=1, default=30)
+    bash_timeout: int = Field(ge=1, default=50)
     data_dir_awareness: bool = True
     send_name_header: bool = True
     memory: MemoryConfig | None = None
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None
+    thinking: ThinkingConfig | None = None
 
 
 class AgentConfig(BaseSettings):

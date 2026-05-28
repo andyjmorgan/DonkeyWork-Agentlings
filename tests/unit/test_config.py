@@ -11,6 +11,7 @@ from agentlings.config import (
     SkillConfig,
     SleepConfig,
     TelemetryConfig,
+    ThinkingConfig,
 )
 
 
@@ -231,7 +232,7 @@ class TestAgentDefinition:
 
     def test_bash_timeout_default(self) -> None:
         defn = AgentDefinition()
-        assert defn.bash_timeout == 30
+        assert defn.bash_timeout == 50
 
     def test_bash_timeout_custom(self) -> None:
         defn = AgentDefinition(bash_timeout=120)
@@ -244,6 +245,54 @@ class TestAgentDefinition:
     def test_bash_timeout_negative_rejected(self) -> None:
         with pytest.raises(Exception):
             AgentDefinition(bash_timeout=-1)
+
+
+class TestThinkingConfig:
+    def test_defaults(self) -> None:
+        cfg = ThinkingConfig()
+        assert cfg.mode == "off"
+        assert cfg.budget_tokens == 8192
+        assert cfg.interleaved is False
+        assert cfg.effort is None
+        assert cfg.display is None
+
+    def test_budget_mode_with_interleaved(self) -> None:
+        cfg = ThinkingConfig(mode="budget", budget_tokens=4096, interleaved=True)
+        assert cfg.mode == "budget"
+        assert cfg.interleaved is True
+
+    def test_adaptive_with_effort_and_display(self) -> None:
+        cfg = ThinkingConfig(mode="adaptive", effort="medium", display="summarized")
+        assert cfg.mode == "adaptive"
+        assert cfg.effort == "medium"
+        assert cfg.display == "summarized"
+
+    def test_budget_tokens_below_min_rejected(self) -> None:
+        with pytest.raises(Exception):
+            ThinkingConfig(mode="budget", budget_tokens=512)
+
+    def test_effort_only_valid_in_adaptive_mode(self) -> None:
+        with pytest.raises(Exception, match="adaptive"):
+            ThinkingConfig(mode="budget", effort="medium")
+
+    def test_display_only_valid_in_adaptive_mode(self) -> None:
+        with pytest.raises(Exception, match="adaptive"):
+            ThinkingConfig(mode="off", display="summarized")
+
+    def test_interleaved_only_valid_in_budget_mode(self) -> None:
+        with pytest.raises(Exception, match="budget"):
+            ThinkingConfig(mode="adaptive", interleaved=True)
+
+    def test_invalid_effort_value_rejected(self) -> None:
+        with pytest.raises(Exception):
+            ThinkingConfig(mode="adaptive", effort="ultra")
+
+    def test_agent_definition_thinking_optional(self) -> None:
+        defn = AgentDefinition()
+        assert defn.thinking is None
+        defn2 = AgentDefinition(thinking=ThinkingConfig(mode="adaptive", effort="medium"))
+        assert defn2.thinking is not None
+        assert defn2.thinking.mode == "adaptive"
 
 
 class TestMemoryConfig:

@@ -138,7 +138,7 @@ class ToolRegistry:
                 is_error=True,
             )
 
-    def register_tools(self, enabled: list[str], bash_timeout: int = 30) -> None:
+    def register_tools(self, enabled: list[str], bash_timeout: int = 50) -> None:
         """Register built-in tools by name or group.
 
         Args:
