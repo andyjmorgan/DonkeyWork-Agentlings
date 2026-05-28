@@ -373,6 +373,50 @@ class TestAnthropicClientThinkingIntegration:
         assert oc["effort"] == "high"
 
 
+class TestThinkingModelMismatchWarning:
+    """The startup warning must not false-positive on adaptive-capable models.
+
+    Regression for the 0.9.0 release where `claude-sonnet-4-` startswith-matched
+    `claude-sonnet-4-6` (which IS adaptive-capable) and warned spuriously.
+    """
+
+    def test_adaptive_on_sonnet_4_6_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from agentlings.core.llm import _warn_if_mode_mismatches_model
+
+        with caplog.at_level("WARNING"):
+            _warn_if_mode_mismatches_model("adaptive", "claude-sonnet-4-6")
+        assert not any("does not support adaptive" in r.message for r in caplog.records)
+
+    def test_adaptive_on_sonnet_4_5_does_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from agentlings.core.llm import _warn_if_mode_mismatches_model
+
+        with caplog.at_level("WARNING"):
+            _warn_if_mode_mismatches_model("adaptive", "claude-sonnet-4-5")
+        assert any("does not support adaptive" in r.message for r in caplog.records)
+
+    def test_budget_on_opus_4_7_does_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from agentlings.core.llm import _warn_if_mode_mismatches_model
+
+        with caplog.at_level("WARNING"):
+            _warn_if_mode_mismatches_model("budget", "claude-opus-4-7")
+        assert any("rejects" in r.message for r in caplog.records)
+
+    def test_adaptive_on_opus_4_6_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from agentlings.core.llm import _warn_if_mode_mismatches_model
+
+        with caplog.at_level("WARNING"):
+            _warn_if_mode_mismatches_model("adaptive", "claude-opus-4-6")
+        assert not any("does not support adaptive" in r.message for r in caplog.records)
+
+
 class TestThinkingFactory:
     """The factory threads thinking through to whichever client it builds."""
 

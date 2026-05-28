@@ -71,9 +71,14 @@ def _build_thinking_kwargs(
 # matching is loose on purpose — Anthropic ships new models faster than
 # we can hardcode them, so we only flag the loudest known incompatibilities.
 _ADAPTIVE_ONLY_MODELS = ("claude-opus-4-7", "claude-opus-4-8", "claude-mythos")
+# Models that DO NOT support adaptive thinking — must use legacy budget mode.
+# Spelled out per-version to avoid prefix collisions: e.g. "claude-sonnet-4-"
+# would startswith-match "claude-sonnet-4-6", which IS adaptive-capable.
 _LEGACY_BUDGET_MODELS = (
     "claude-sonnet-3-7",
-    "claude-sonnet-4-",  # 4.0 / 4.1 / 4.5 (4.6+ accept budget but deprecated)
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-1",
+    "claude-sonnet-4-5",
     "claude-opus-4-0",
     "claude-opus-4-1",
     "claude-opus-4-5",
