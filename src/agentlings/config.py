@@ -159,6 +159,38 @@ class TelemetryConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class OAuthConfig(BaseModel):
+    """OAuth/OIDC bearer-token validation for the HTTP surface.
+
+    The agentling acts purely as an OAuth 2.0 Resource Server: it validates
+    the ``Authorization: Bearer`` JWT's signature against the issuer's
+    published JWKS and checks ``iss``/``aud``/``exp``. It never issues tokens,
+    inspects user identity, or enforces scopes — a validly-signed,
+    correctly-audienced, unexpired token from the trusted issuer is accepted.
+
+    Attributes:
+        enabled: Whether bearer-token validation is active. When ``False`` the
+            HTTP surface is protected by the API key alone.
+        issuer: The token issuer URL, matched against the ``iss`` claim and
+            advertised to clients (e.g. ``https://auth.example.com/realms/x``).
+        audience: The resource identifier this server validates against the
+            token's ``aud`` claim. A token whose ``aud`` (string or array)
+            contains this value is accepted.
+        jwks_uri: The issuer's JWKS endpoint. When ``None`` it is resolved at
+            first use from the issuer's OIDC discovery document
+            (``{issuer}/.well-known/openid-configuration``).
+        algorithms: Permitted JWS signing algorithms.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    issuer: str = ""
+    audience: str = ""
+    jwks_uri: str | None = None
+    algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+
+
 class SkillConfig(BaseModel):
     """A skill advertised in the Agent Card.
 
@@ -221,6 +253,7 @@ class AgentDefinition(BaseModel):
     sleep: SleepConfig | None = None
     telemetry: TelemetryConfig | None = None
     thinking: ThinkingConfig | None = None
+    oauth: OAuthConfig | None = None
 
 
 class AgentConfig(BaseSettings):
@@ -256,6 +289,9 @@ class AgentConfig(BaseSettings):
     agent_otel_headers: str = ""
     agent_task_await_seconds: int = 60
     agent_tools_dir: Path | None = None
+    agent_oauth_issuer: str | None = None
+    agent_oauth_audience: str | None = None
+    agent_oauth_jwks_uri: str | None = None
 
     _definition: AgentDefinition = AgentDefinition()
 
@@ -315,6 +351,31 @@ class AgentConfig(BaseSettings):
     def sleep_config(self) -> SleepConfig | None:
         """Sleep cycle configuration from the YAML definition."""
         return self._definition.sleep
+
+    @property
+    def oauth_config(self) -> OAuthConfig | None:
+        """OAuth configuration, with env vars overriding YAML values.
+
+        Returns ``None`` unless OAuth is enabled, either by an ``oauth`` block
+        in the YAML definition with ``enabled: true`` or by setting
+        ``AGENT_OAUTH_ISSUER`` (which implies enablement).
+        """
+        base = self._definition.oauth
+        if self.agent_oauth_issuer:
+            if base is None:
+                base = OAuthConfig(enabled=True)
+            updates: dict[str, Any] = {
+                "enabled": True,
+                "issuer": self.agent_oauth_issuer,
+            }
+            if self.agent_oauth_audience:
+                updates["audience"] = self.agent_oauth_audience
+            if self.agent_oauth_jwks_uri:
+                updates["jwks_uri"] = self.agent_oauth_jwks_uri
+            base = base.model_copy(update=updates)
+        if base is None or not base.enabled:
+            return None
+        return base
 
     @property
     def telemetry_config(self) -> TelemetryConfig | None:
