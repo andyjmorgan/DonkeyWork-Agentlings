@@ -185,6 +185,13 @@ class AgentDefinition(BaseModel):
         skills: Skills to advertise in the Agent Card.
         system_prompt: The system prompt sent to the LLM.
         bash_timeout: Default timeout in seconds for bash tool commands.
+        max_tool_result_chars: Maximum character length of a single tool result
+            before it is truncated (with a marker telling the model it was cut)
+            on its way back to the LLM. Guards against a runaway tool (e.g. a
+            recursive grep sweeping up minified assets) producing a multi-MB
+            result that blows the request body past the API's hard size limit
+            and fails the turn with a 413. Defaults to 32000; set ``0`` to
+            disable truncation.
         data_dir_awareness: When ``True`` (default), append a system-prompt
             block telling the agent where its data directory lives and how
             to read journals and conversation logs. Set to ``False`` for
@@ -205,6 +212,9 @@ class AgentDefinition(BaseModel):
     skills: list[SkillConfig] = Field(default_factory=list)
     system_prompt: str | None = None
     bash_timeout: int = Field(ge=1, default=50)
+    # Keep the default in sync with completion.DEFAULT_MAX_TOOL_RESULT_CHARS
+    # (literal here to avoid a config<->core import cycle). 0 disables truncation.
+    max_tool_result_chars: int = Field(ge=0, default=32_000)
     data_dir_awareness: bool = True
     send_name_header: bool = True
     memory: MemoryConfig | None = None

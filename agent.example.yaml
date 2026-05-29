@@ -20,6 +20,14 @@ system_prompt: |
 
   Be concise. Use code blocks for command output.
 
+# bash_timeout: 50            # default per-command bash timeout (seconds)
+# max_tool_result_chars: 32000  # cap a single tool result before it's truncated
+#                               # (with a marker) on its way back to the model.
+#                               # Stops a runaway tool (e.g. recursive grep over
+#                               # large files) from blowing the request body past
+#                               # the API size limit and failing the turn with a
+#                               # 413. Set 0 to disable truncation.
+
 memory:
   token_budget: 2000
   # injection_prompt: null  # override the memory injection template
