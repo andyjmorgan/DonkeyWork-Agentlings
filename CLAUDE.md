@@ -80,6 +80,7 @@ All via environment variables (loaded from `.env` via python-dotenv):
 - `AGENT_SYSTEM_PROMPT_FILE` — optional path to override default system prompt
 - `AGENT_LOG_LEVEL` (default `INFO`)
 - `AGENT_TASK_AWAIT_SECONDS` (default `60`) — HTTP handler await timeout before yielding a task handle to the caller
+- `AGENT_OAUTH_ISSUER` / `AGENT_OAUTH_AUDIENCE` / `AGENT_OAUTH_JWKS_URI` (optional) — enable OAuth/OIDC bearer-token validation. Setting the issuer turns it on; the agentling acts as a resource server validating JWT signature + `iss`/`aud`/`exp` against the issuer's JWKS (derived from OIDC discovery when `jwks_uri` is unset). The API key and a bearer token are both accepted. Also configurable via an `oauth:` block in the agent YAML. Covers both `/mcp` (RFC 9728 Protected Resource Metadata + `WWW-Authenticate`) and `/a2a` (Agent Card `openIdConnect` scheme).
 
 ## Logging
 

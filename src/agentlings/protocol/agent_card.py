@@ -8,6 +8,7 @@ from a2a.types import (
     AgentInterface,
     AgentSkill,
     APIKeySecurityScheme,
+    OpenIdConnectSecurityScheme,
     SecurityRequirement,
     SecurityScheme,
     StringList,
@@ -54,6 +55,33 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
             )
         ]
 
+    security_schemes: dict[str, SecurityScheme] = {
+        "apiKey": SecurityScheme(
+            api_key_security_scheme=APIKeySecurityScheme(
+                location="header",
+                name="X-API-Key",
+            )
+        )
+    }
+    # Two requirements in the list mean "apiKey OR oidc", mirroring the
+    # either-credential-works behaviour of the auth middleware.
+    security_requirements = [
+        SecurityRequirement(schemes={"apiKey": StringList(list=[])})
+    ]
+
+    oauth = config.oauth_config
+    if oauth is not None:
+        security_schemes["oidc"] = SecurityScheme(
+            open_id_connect_security_scheme=OpenIdConnectSecurityScheme(
+                open_id_connect_url=(
+                    oauth.issuer.rstrip("/") + "/.well-known/openid-configuration"
+                ),
+            )
+        )
+        security_requirements.append(
+            SecurityRequirement(schemes={"oidc": StringList(list=[])})
+        )
+
     return AgentCard(
         name=config.agent_name,
         description=config.agent_description,
@@ -69,15 +97,6 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
         capabilities=AgentCapabilities(streaming=False, push_notifications=False),
         default_input_modes=["text"],
         default_output_modes=["text"],
-        security_schemes={
-            "apiKey": SecurityScheme(
-                api_key_security_scheme=APIKeySecurityScheme(
-                    location="header",
-                    name="X-API-Key",
-                )
-            )
-        },
-        security_requirements=[
-            SecurityRequirement(schemes={"apiKey": StringList(list=[])})
-        ],
+        security_schemes=security_schemes,
+        security_requirements=security_requirements,
     )

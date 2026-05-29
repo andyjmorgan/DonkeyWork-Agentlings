@@ -335,6 +335,32 @@ Secrets and runtime settings stay in env vars or, more commonly, the `.env` file
 | `AGENT_OTEL_PROTOCOL` | `http` | Collector protocol (`http` or `grpc`) |
 | `AGENT_OTEL_INSECURE` | `true` | Disable TLS for collector connection |
 | `AGENT_OTEL_HEADERS` | — | Comma-separated `key=value` pairs for collector auth |
+| `AGENT_OAUTH_ISSUER` | — | OAuth/OIDC issuer URL; setting it enables bearer-token validation |
+| `AGENT_OAUTH_AUDIENCE` | — | Resource identifier validated against the token's `aud` claim |
+| `AGENT_OAUTH_JWKS_URI` | — | JWKS endpoint; derived from the issuer's OIDC discovery doc when unset |
+
+## OAuth
+
+Beyond the shared `AGENT_API_KEY`, an agentling can accept **OAuth 2.0 bearer tokens** issued by an external identity provider (Keycloak, Auth0, Entra, …). It acts purely as a *resource server*: it validates a token's signature against the issuer's published JWKS and checks `iss`/`aud`/`exp`. It never issues tokens, inspects user identity, or enforces scopes — any validly-signed, correctly-audienced, unexpired token from the trusted issuer is accepted.
+
+Enable it with an `oauth` block in `agent.yaml` (or the `AGENT_OAUTH_*` env vars above):
+
+```yaml
+oauth:
+  enabled: true
+  issuer: https://auth.example.com/realms/Agents
+  audience: my-agentling-api          # must match the token's aud claim
+  jwks_uri: null                      # optional; derived from OIDC discovery when omitted
+```
+
+Both protocol surfaces are covered by a single auth layer — the API key and a bearer token are *both* accepted (either credential passes), so existing API-key clients keep working while OAuth clients use tokens. Each protocol advertises the requirement in its own dialect:
+
+- **MCP** serves RFC 9728 Protected Resource Metadata at `/.well-known/oauth-protected-resource` (and the path-suffixed `/mcp` variant) and returns `401` with a `WWW-Authenticate` challenge pointing at it.
+- **A2A** declares an `openIdConnect` security scheme in the Agent Card, pointing clients at the issuer's `/.well-known/openid-configuration`.
+
+Both documents are generated from the single `oauth` block, so they can never drift from what the server actually validates. The provider hosts all authorization-server metadata; the agentling only names the issuer.
+
+> **Audience binding is the security boundary.** Configure your IdP to issue tokens whose `aud` contains the value in `audience` (e.g. a Keycloak *Audience* protocol mapper or client scope). A token minted for a different resource will be rejected — which is exactly what stops a token issued for one agentling being replayed against another.
 
 ## Memory
 

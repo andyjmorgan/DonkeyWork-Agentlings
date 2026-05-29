@@ -8,7 +8,10 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
+import httpx
+import jwt
 import uvicorn
+from jwt import PyJWKClient
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes.agent_card_routes import create_agent_card_routes
 from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
@@ -20,7 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from agentlings.config import AgentConfig
+from agentlings.config import AgentConfig, OAuthConfig
 from agentlings.core.llm import create_llm_client
 from agentlings.core.loop import MessageLoop
 from agentlings.core.memory_store import MemoryFileStore
@@ -40,37 +43,107 @@ from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+_PROTECTED_RESOURCE_PATHS = {
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+}
+
 _PUBLIC_PATHS = {
     "/.well-known/agent.json",
     "/.well-known/agent-card.json",
+    *_PROTECTED_RESOURCE_PATHS,
 }
 
 
-class APIKeyMiddleware(BaseHTTPMiddleware):
-    """Middleware that enforces ``X-API-Key`` header authentication on non-public paths."""
+def _resolve_jwks_uri(oauth: OAuthConfig) -> str:
+    """Return the JWKS endpoint, deriving it from OIDC discovery if unset.
 
-    def __init__(self, app: Any, api_key: str) -> None:
+    A configured ``jwks_uri`` is used verbatim. Otherwise the issuer's OIDC
+    discovery document is fetched and its ``jwks_uri`` field returned — the one
+    mechanism that works uniformly across IdPs (Keycloak, Auth0, Entra, …),
+    which all publish different JWKS paths.
+    """
+    if oauth.jwks_uri:
+        return oauth.jwks_uri
+    discovery_url = oauth.issuer.rstrip("/") + "/.well-known/openid-configuration"
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(discovery_url)
+        response.raise_for_status()
+        return response.json()["jwks_uri"]
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Authenticate non-public requests via an ``X-API-Key`` or an OAuth Bearer JWT.
+
+    Either credential is accepted. The API key is a single shared secret. The
+    Bearer path validates the JWT's signature against the issuer's published
+    JWKS and checks ``iss``/``aud``/``exp`` — no scope or per-user
+    authorization. When OAuth is disabled this behaves exactly like a plain
+    API-key gate.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        api_key: str,
+        oauth: OAuthConfig | None = None,
+        resource_metadata_url: str | None = None,
+    ) -> None:
         super().__init__(app)
         self._api_key = api_key
+        self._oauth = oauth
+        self._resource_metadata_url = resource_metadata_url
+        # JWKS client construction (and any OIDC-discovery fetch it needs)
+        # is deferred to the first bearer request so app startup never blocks
+        # on the IdP being reachable.
+        self._jwks_client: PyJWKClient | None = None
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
-        """Check the API key header and reject unauthorized requests.
-
-        Args:
-            request: The incoming HTTP request.
-            call_next: Callable to pass the request to the next middleware or route.
-
-        Returns:
-            The downstream response, or a 401 JSON response if unauthorized.
-        """
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
 
-        key = request.headers.get("x-api-key", "")
-        if key != self._api_key:
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        if self._api_key and request.headers.get("x-api-key", "") == self._api_key:
+            return await call_next(request)
 
-        return await call_next(request)
+        if self._oauth is not None and self._valid_bearer(request):
+            return await call_next(request)
+
+        return self._unauthorized()
+
+    def _valid_bearer(self, request: Request) -> bool:
+        assert self._oauth is not None
+        header = request.headers.get("authorization", "")
+        if not header.lower().startswith("bearer "):
+            return False
+        token = header[7:].strip()
+        try:
+            signing_key = self._jwks().get_signing_key_from_jwt(token)
+            jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=self._oauth.algorithms,
+                audience=self._oauth.audience,
+                issuer=self._oauth.issuer,
+            )
+            return True
+        except Exception:  # noqa: BLE001 — any verification failure is an auth failure
+            logger.debug("bearer token rejected", exc_info=True)
+            return False
+
+    def _jwks(self) -> PyJWKClient:
+        assert self._oauth is not None
+        if self._jwks_client is None:
+            self._jwks_client = PyJWKClient(_resolve_jwks_uri(self._oauth))
+        return self._jwks_client
+
+    def _unauthorized(self) -> Response:
+        headers: dict[str, str] = {}
+        if self._oauth is not None and self._resource_metadata_url:
+            headers["WWW-Authenticate"] = (
+                f'Bearer resource_metadata="{self._resource_metadata_url}"'
+            )
+        return JSONResponse({"error": "Unauthorized"}, status_code=401, headers=headers)
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
@@ -131,6 +204,26 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                     otel_context.detach(token)
                 except Exception:  # noqa: BLE001
                     pass
+
+
+def _external_base_url(config: AgentConfig) -> str:
+    """The canonical externally-reachable base URL for this agentling."""
+    if config.agent_external_url:
+        return config.agent_external_url.rstrip("/")
+    return f"http://{config.agent_host}:{config.agent_port}"
+
+
+def _protected_resource_metadata(config: AgentConfig, oauth: OAuthConfig) -> dict[str, Any]:
+    """Build the RFC 9728 Protected Resource Metadata document.
+
+    Generated from config so it can never drift from what ``AuthMiddleware``
+    actually validates against.
+    """
+    return {
+        "resource": _external_base_url(config) + "/mcp",
+        "authorization_servers": [oauth.issuer],
+        "bearer_methods_supported": ["header"],
+    }
 
 
 def _create_app(config: AgentConfig | None = None) -> Starlette:
@@ -285,6 +378,9 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         agent_card=agent_card, card_url="/.well-known/agent.json"
     )
 
+    oauth = config.oauth_config
+    resource_metadata_url: str | None = None
+
     routes = [
         Route("/mcp", mcp_endpoint, methods=["GET", "POST", "DELETE"]),
         *jsonrpc_routes,
@@ -292,10 +388,36 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
         *legacy_card_routes,
     ]
 
+    if oauth is not None:
+        resource_metadata_url = (
+            _external_base_url(config) + "/.well-known/oauth-protected-resource"
+        )
+        metadata = _protected_resource_metadata(config, oauth)
+
+        async def protected_resource_metadata(request: Request) -> Response:
+            return JSONResponse(metadata)
+
+        # Serve at both the bare path and the RFC 9728 path-suffixed variant
+        # (for resource ``/mcp``) so strict and lenient clients both resolve it.
+        routes.extend(
+            Route(path, protected_resource_metadata, methods=["GET"])
+            for path in sorted(_PROTECTED_RESOURCE_PATHS)
+        )
+        logger.info(
+            "oauth bearer-token validation enabled (issuer=%s, audience=%s)",
+            oauth.issuer,
+            oauth.audience,
+        )
+
     middleware = [
         # Telemetry runs outermost so it observes auth failures too.
         Middleware(TelemetryMiddleware),
-        Middleware(APIKeyMiddleware, api_key=config.agent_api_key),
+        Middleware(
+            AuthMiddleware,
+            api_key=config.agent_api_key,
+            oauth=oauth,
+            resource_metadata_url=resource_metadata_url,
+        ),
     ]
 
     app = Starlette(

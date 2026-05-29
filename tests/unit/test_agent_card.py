@@ -28,10 +28,41 @@ def test_generated_card_security(test_config: AgentConfig) -> None:
     card = generate_agent_card(test_config)
     assert card.security_schemes is not None
     assert "apiKey" in card.security_schemes
+    assert "oidc" not in card.security_schemes
     # security_requirements is a repeated SecurityRequirement; we advertise
     # a single requirement keying on ``apiKey``.
     assert len(card.security_requirements) == 1
     assert "apiKey" in card.security_requirements[0].schemes
+
+
+def test_card_advertises_oidc_when_oauth_enabled(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "agent.yaml"
+    yaml_file.write_text(
+        "name: secured\n"
+        "description: Secured agent\n"
+        "oauth:\n"
+        "  enabled: true\n"
+        "  issuer: https://auth.donkeywork.dev/realms/Agents\n"
+        "  audience: donkeywork-agents-api\n"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        agent_config=str(yaml_file),
+        _env_file=None,
+    )
+    card = generate_agent_card(config)
+    assert "apiKey" in card.security_schemes
+    assert "oidc" in card.security_schemes
+    assert (
+        card.security_schemes["oidc"].open_id_connect_security_scheme.open_id_connect_url
+        == "https://auth.donkeywork.dev/realms/Agents/.well-known/openid-configuration"
+    )
+    # apiKey OR oidc — two independent requirements.
+    requirement_keys = [set(r.schemes.keys()) for r in card.security_requirements]
+    assert {"apiKey"} in requirement_keys
+    assert {"oidc"} in requirement_keys
 
 
 def test_skills_from_yaml(test_config: AgentConfig) -> None:

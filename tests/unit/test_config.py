@@ -8,11 +8,104 @@ from agentlings.config import (
     AgentConfig,
     AgentDefinition,
     MemoryConfig,
+    OAuthConfig,
     SkillConfig,
     SleepConfig,
     TelemetryConfig,
     ThinkingConfig,
 )
+
+
+def _clear_oauth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in (
+        "AGENT_OAUTH_ISSUER",
+        "AGENT_OAUTH_AUDIENCE",
+        "AGENT_OAUTH_JWKS_URI",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_oauth_disabled_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_oauth_env(monkeypatch)
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        _env_file=None,
+    )
+    assert config.oauth_config is None
+
+
+def test_oauth_from_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_oauth_env(monkeypatch)
+    yaml_file = tmp_path / "agent.yaml"
+    yaml_file.write_text(
+        "name: secured\n"
+        "description: Secured agent\n"
+        "oauth:\n"
+        "  enabled: true\n"
+        "  issuer: https://auth.donkeywork.dev/realms/Agents\n"
+        "  audience: donkeywork-agents-api\n"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        agent_config=str(yaml_file),
+        _env_file=None,
+    )
+    oauth = config.oauth_config
+    assert oauth is not None
+    assert oauth.issuer == "https://auth.donkeywork.dev/realms/Agents"
+    assert oauth.audience == "donkeywork-agents-api"
+    assert oauth.jwks_uri is None
+    assert oauth.algorithms == ["RS256"]
+
+
+def test_oauth_yaml_disabled_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_oauth_env(monkeypatch)
+    yaml_file = tmp_path / "agent.yaml"
+    yaml_file.write_text(
+        "name: secured\n"
+        "oauth:\n"
+        "  enabled: false\n"
+        "  issuer: https://auth.donkeywork.dev/realms/Agents\n"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        agent_config=str(yaml_file),
+        _env_file=None,
+    )
+    assert config.oauth_config is None
+
+
+def test_oauth_env_enables_and_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting the issuer via env enables OAuth and overrides YAML values."""
+    monkeypatch.setenv("AGENT_OAUTH_ISSUER", "https://env-issuer/realms/X")
+    monkeypatch.setenv("AGENT_OAUTH_AUDIENCE", "env-audience")
+    monkeypatch.setenv(
+        "AGENT_OAUTH_JWKS_URI", "https://env-issuer/realms/X/protocol/openid-connect/certs"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        _env_file=None,
+    )
+    oauth = config.oauth_config
+    assert oauth is not None
+    assert oauth.enabled is True
+    assert oauth.issuer == "https://env-issuer/realms/X"
+    assert oauth.audience == "env-audience"
+    assert oauth.jwks_uri.endswith("/protocol/openid-connect/certs")
 
 
 def test_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
