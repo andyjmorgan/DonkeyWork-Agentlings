@@ -362,6 +362,21 @@ Both documents are generated from the single `oauth` block, so they can never dr
 
 > **Audience binding is the security boundary.** Configure your IdP to issue tokens whose `aud` contains the value in `audience` (e.g. a Keycloak *Audience* protocol mapper or client scope). A token minted for a different resource will be rejected — which is exactly what stops a token issued for one agentling being replayed against another.
 
+## Icons
+
+An agentling can advertise PNG **icons** on its MCP surface so clients can show a recognizable image for the server and its tools. Icons ride on the standard MCP `Icon` type — the server's on `serverInfo.icons`, and one set per tool (the spawn tool named after the agent, and its `__get_task` companion).
+
+Configure with an `icons` block in `agent.yaml`:
+
+```yaml
+icons:
+  server: https://cdn.example.com/icons/agentling   # MCP serverInfo icon
+  spawn:  https://cdn.example.com/icons/play         # the main (spawn) tool
+  task:   https://cdn.example.com/icons/task         # the __get_task tool
+```
+
+Each value is a **base URL stem**: the framework appends `-<size>.png` for every size in `ICON_SIZES` — **16, 32, 64, 128, 256, 512** — and emits one `Icon` per resolution so clients pick the best fit for their display. So `server: …/agentling` advertises `agentling-16.png` through `agentling-512.png`; host those six PNGs at the corresponding URLs (any public store/CDN, served as `image/png`). Omit a key — or the whole block — to send no icons for that surface.
+
 ## Memory
 
 Agentlings can maintain persistent long-term memory — a curated set of key-value facts that survive across conversations. Memory transforms an agent from a tool that forgets into one that learns.
