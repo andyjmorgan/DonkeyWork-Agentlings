@@ -30,7 +30,7 @@ Package structure under `src/agentlings/`:
   - `completion.py` — shared LLM completion cycle with per-turn callback + cancellation
 - `protocol/` — protocol adapters
   - `a2a.py` — `AgentlingExecutor` bridging A2A SDK to the task engine
-  - `mcp.py` — MCP server exposing a single task-aware tool
+  - `mcp.py` — MCP server exposing task-aware tools (spawn + `__get_task`), with optional server/tool icons
   - `agent_card.py` — Agent Card generation from config
 - `tools/` — pluggable tool system
   - `registry.py` — `ToolRegistry` with group-based registration
@@ -81,6 +81,7 @@ All via environment variables (loaded from `.env` via python-dotenv):
 - `AGENT_LOG_LEVEL` (default `INFO`)
 - `AGENT_TASK_AWAIT_SECONDS` (default `60`) — HTTP handler await timeout before yielding a task handle to the caller
 - `AGENT_OAUTH_ISSUER` / `AGENT_OAUTH_AUDIENCE` / `AGENT_OAUTH_JWKS_URI` (optional) — enable OAuth/OIDC bearer-token validation. Setting the issuer turns it on; the agentling acts as a resource server validating JWT signature + `iss`/`aud`/`exp` against the issuer's JWKS (derived from OIDC discovery when `jwks_uri` is unset). The API key and a bearer token are both accepted. Also configurable via an `oauth:` block in the agent YAML. Covers both `/mcp` (RFC 9728 Protected Resource Metadata + `WWW-Authenticate`) and `/a2a` (Agent Card `openIdConnect` scheme).
+- `icons` (agent YAML only) — optional `icons:` block advertising PNG icons on the MCP surface. Keys `server` / `spawn` / `task` are base-URL stems; the framework appends `-<size>.png` for sizes 16/32/64/128/256/512 (`ICON_SIZES`) and emits one MCP `Icon` per size on `serverInfo.icons` and the matching tool. See README "Icons".
 
 ## Logging
 
