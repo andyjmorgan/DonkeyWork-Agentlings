@@ -38,26 +38,32 @@ from agentlings.core.telemetry import otel_span
 
 logger = logging.getLogger(__name__)
 
-# Resolutions advertised for each MCP icon. The CDN holds one PNG per size,
-# named ``<base>-<size>.png``; clients pick the best fit for their display.
-ICON_SIZES = (16, 32, 64, 128, 256, 512)
+def _icon_set(url: str | None) -> list[Icon] | None:
+    """Wrap a single icon URL in the one-element ``Icon`` list MCP expects.
 
-
-def _icon_set(base: str | None) -> list[Icon] | None:
-    """Expand a CDN icon base into one ``Icon`` per size in ``ICON_SIZES``.
-
-    ``base`` is a URL stem (e.g. ``https://cdn/icons/agentling``) to which
-    ``-<size>.png`` is appended. Returns ``None`` when ``base`` is unset so the
-    ``icons`` field is omitted from the MCP payload entirely rather than sent
-    empty.
+    ``url`` is the full icon address (an HTTPS URL or a ``data:`` URI). We
+    advertise exactly one icon per surface and omit ``sizes`` so any client
+    scales it to fit: the spec's multi-resolution array assumes clients pick a
+    best fit, but real clients (the MCP Inspector among them) render every
+    entry side by side, so a single icon is the only thing that displays
+    cleanly. Returns ``None`` when ``url`` is unset so the ``icons`` field is
+    dropped from the payload rather than sent empty.
     """
-    if not base:
+    if not url:
         return None
-    stem = base.rstrip("/")
-    return [
-        Icon(src=f"{stem}-{size}.png", mimeType="image/png", sizes=[f"{size}x{size}"])
-        for size in ICON_SIZES
-    ]
+    mime = None if url.startswith("data:") else _mime_from_url(url)
+    return [Icon(src=url, mimeType=mime)]
+
+
+def _mime_from_url(url: str) -> str | None:
+    suffix = url.rsplit(".", 1)[-1].lower() if "." in url else ""
+    return {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "svg": "image/svg+xml",
+        "webp": "image/webp",
+    }.get(suffix)
 
 
 def create_mcp_server(

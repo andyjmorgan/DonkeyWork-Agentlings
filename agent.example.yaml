@@ -83,9 +83,9 @@ telemetry:
 #   jwks_uri: null                      # optional; derived from OIDC discovery when omitted
 
 # icons:
-#   # PNG icons advertised on the MCP surface (serverInfo + per-tool). Each value
-#   # is a base-URL stem; the framework appends -<size>.png for sizes
-#   # 16/32/64/128/256/512 and emits one Icon per size. See README "Icons".
-#   server: https://cdn.example.com/icons/agentling   # MCP server icon
-#   spawn:  https://cdn.example.com/icons/play         # main (spawn) tool
-#   task:   https://cdn.example.com/icons/task         # __get_task tool
+#   # Icons advertised on the MCP surface (serverInfo + per-tool). Each value is
+#   # the full icon URL (HTTPS or data: URI), served as a single icon the client
+#   # scales to fit; MIME type is inferred from the extension. See README "Icons".
+#   server: https://cdn.example.com/icons/agentling.png   # MCP server icon
+#   spawn:  https://cdn.example.com/icons/play.png         # main (spawn) tool
+#   task:   https://cdn.example.com/icons/task.png         # __get_task tool

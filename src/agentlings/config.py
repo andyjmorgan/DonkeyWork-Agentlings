@@ -192,17 +192,19 @@ class OAuthConfig(BaseModel):
 
 
 class IconsConfig(BaseModel):
-    """CDN icon bases advertised on the MCP surface.
+    """Icon URLs advertised on the MCP surface.
 
-    Each value is a base URL to which ``-<size>.png`` is appended for every
-    size in ``agentlings.protocol.mcp.ICON_SIZES`` (16/32/64/128/256/512),
-    producing one MCP ``Icon`` per resolution so clients can pick the best
-    fit. A ``None`` value omits icons for that surface.
+    Each value is the full icon address — an HTTPS URL or a ``data:`` URI —
+    advertised as a single MCP ``Icon`` on the relevant surface. We send one
+    icon per surface rather than a multi-resolution set because real clients
+    (the MCP Inspector included) render every entry in the ``icons`` array
+    side by side instead of selecting a best fit. A ``None`` value omits icons
+    for that surface.
 
     Attributes:
-        server: Base URL for the MCP server icon (``serverInfo.icons``).
-        spawn: Base URL for the main spawn tool's icon.
-        task: Base URL for the ``__get_task`` tool's icon.
+        server: Icon URL for the MCP server (``serverInfo.icons``).
+        spawn: Icon URL for the main spawn tool.
+        task: Icon URL for the ``__get_task`` tool.
     """
 
     model_config = ConfigDict(extra="ignore")
