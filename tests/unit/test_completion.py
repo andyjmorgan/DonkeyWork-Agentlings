@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-from agentlings.core.completion import run_completion
+from agentlings.core.completion import _truncate_tool_output, run_completion
 from agentlings.core.llm import LLMResponse, MockLLMClient
 from agentlings.tools.registry import ToolRegistry, ToolResult
 
@@ -405,3 +405,73 @@ class TestToolResultMessageContract:
         sent_ids = [b["id"] for b in assistant_msg["content"] if b["type"] == "tool_use"]
         recv_ids = [r["tool_use_id"] for r in tool_result_msg["content"]]
         assert sent_ids == recv_ids
+
+
+# ---------------------------------------------------------------------------
+# Tool result truncation — guard against oversized results (413 prevention)
+# ---------------------------------------------------------------------------
+
+class TestTruncateToolOutputHelper:
+    """Unit-level behaviour of the ``_truncate_tool_output`` helper."""
+
+    def test_under_limit_passes_through_unchanged(self) -> None:
+        out = "x" * 100
+        assert _truncate_tool_output(out, 32_000) == out
+
+    def test_exactly_at_limit_passes_through_unchanged(self) -> None:
+        out = "x" * 50
+        assert _truncate_tool_output(out, 50) == out
+
+    def test_over_limit_is_truncated_with_notice(self) -> None:
+        out = "x" * 1000
+        result = _truncate_tool_output(out, 100)
+        # First `limit` chars are preserved verbatim...
+        assert result.startswith("x" * 100)
+        # ...the original payload is not sent in full...
+        assert "x" * 1000 not in result
+        # ...and the model is told it was cut and by how much.
+        assert "truncated" in result
+        assert "900" in result  # dropped char count
+
+    def test_limit_zero_disables_truncation(self) -> None:
+        out = "x" * 1_000_000
+        assert _truncate_tool_output(out, 0) == out
+
+    def test_negative_limit_disables_truncation(self) -> None:
+        out = "x" * 1_000_000
+        assert _truncate_tool_output(out, -1) == out
+
+
+class TestRunCompletionTruncatesResults:
+    """The completion loop must cap oversized tool results before they reach the LLM."""
+
+    async def test_oversized_result_truncated_in_message(self) -> None:
+        huge = "A" * 200_000
+
+        async def _huge_tool(name: str, input_dict: dict[str, Any]) -> ToolResult:
+            return ToolResult(output=huge, is_error=False)
+
+        llm = _OneShotToolLLM(_tool_calls("big"))
+        messages = [{"role": "user", "content": [{"type": "text", "text": "go"}]}]
+        await run_completion(
+            llm, [], messages, _stub_registry(_huge_tool), max_tool_result_chars=1000
+        )
+
+        content = messages[2]["content"][0]["content"]
+        # Body capped to the limit, plus a (small) truncation notice.
+        assert content.startswith("A" * 1000)
+        assert len(content) < 2000
+        assert "truncated" in content
+
+    async def test_small_result_not_truncated(self) -> None:
+        async def _small_tool(name: str, input_dict: dict[str, Any]) -> ToolResult:
+            return ToolResult(output="just fine", is_error=False)
+
+        llm = _OneShotToolLLM(_tool_calls("small"))
+        messages = [{"role": "user", "content": [{"type": "text", "text": "go"}]}]
+        await run_completion(
+            llm, [], messages, _stub_registry(_small_tool), max_tool_result_chars=1000
+        )
+
+        assert messages[2]["content"][0]["content"] == "just fine"
+        assert "truncated" not in messages[2]["content"][0]["content"]

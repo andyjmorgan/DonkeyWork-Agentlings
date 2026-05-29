@@ -15,6 +15,36 @@ from agentlings.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+# Default cap on a single tool result's character length before it is truncated
+# on its way back to the model. A single runaway command (e.g. ``grep -r`` over
+# ``$HOME`` sweeping up minified assets) can otherwise produce a multi-MB result
+# that pushes the whole request body past the API's hard size limit, failing the
+# turn with a 413 instead of letting the model recover. Overridable per-agent via
+# ``AgentDefinition.max_tool_result_chars``; ``<= 0`` disables truncation.
+DEFAULT_MAX_TOOL_RESULT_CHARS = 32_000
+
+
+def _truncate_tool_output(output: str, limit: int) -> str:
+    """Cap an oversized tool result and tell the model it was truncated.
+
+    Keeps the first ``limit`` characters and appends a marker stating the
+    original size and how much was dropped, so the model knows the output is
+    incomplete and can re-run with a narrower command rather than silently
+    losing data. ``limit <= 0`` disables truncation and returns ``output``
+    unchanged.
+    """
+    if limit <= 0 or len(output) <= limit:
+        return output
+    dropped = len(output) - limit
+    notice = (
+        f"\n\n[agentling: tool result truncated — it was {len(output):,} chars, "
+        f"over the {limit:,}-char limit, so {dropped:,} chars were dropped. "
+        f"The text above is the first {limit:,} chars. Re-run with a more "
+        f"targeted command (narrower path, a grep filter, head -c, etc.) to see "
+        f"the rest.]"
+    )
+    return output[:limit] + notice
+
 
 class CancellationRequested(Exception):
     """Raised inside ``run_completion`` when a cancel callback returns ``True``.
@@ -98,6 +128,7 @@ async def run_completion(
     should_cancel: Callable[[], bool] | None = None,
     context_id: str | None = None,
     task_id: str | None = None,
+    max_tool_result_chars: int = DEFAULT_MAX_TOOL_RESULT_CHARS,
 ) -> CompletionResult:
     """Run the LLM in a loop, executing tool calls until a terminal text response.
 
@@ -122,6 +153,10 @@ async def run_completion(
             ``llm.complete`` call so each request carries the session header.
         task_id: The task execution this cycle belongs to. Forwarded to every
             ``llm.complete`` call so each request carries the task header.
+        max_tool_result_chars: Maximum character length of a single tool
+            result before it is truncated (with a marker) on its way back to
+            the model. Guards against a runaway tool blowing the request body
+            past the API's hard size limit. ``<= 0`` disables truncation.
 
     Returns:
         The final response content and all intermediate responses.
@@ -252,7 +287,7 @@ async def run_completion(
                     return {
                         "type": "tool_result",
                         "tool_use_id": block["id"],
-                        "content": result.output,
+                        "content": _truncate_tool_output(result.output, max_tool_result_chars),
                         "is_error": result.is_error,
                     }
                 except asyncio.CancelledError:

@@ -527,6 +527,7 @@ class TaskWorker:
             should_cancel=lambda: record.cancel_flag,
             context_id=record.context_id,
             task_id=record.task_id,
+            max_tool_result_chars=self._config.definition.max_tool_result_chars,
         )
         # Stash so ``run`` can stamp the cycle's token totals onto the
         # worker span before exiting.
