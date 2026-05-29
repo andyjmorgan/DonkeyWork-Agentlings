@@ -191,6 +191,27 @@ class OAuthConfig(BaseModel):
     algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
 
 
+class IconsConfig(BaseModel):
+    """CDN icon bases advertised on the MCP surface.
+
+    Each value is a base URL to which ``-<size>.png`` is appended for every
+    size in ``agentlings.protocol.mcp.ICON_SIZES`` (16/32/64/128/256/512),
+    producing one MCP ``Icon`` per resolution so clients can pick the best
+    fit. A ``None`` value omits icons for that surface.
+
+    Attributes:
+        server: Base URL for the MCP server icon (``serverInfo.icons``).
+        spawn: Base URL for the main spawn tool's icon.
+        task: Base URL for the ``__get_task`` tool's icon.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    server: str | None = None
+    spawn: str | None = None
+    task: str | None = None
+
+
 class SkillConfig(BaseModel):
     """A skill advertised in the Agent Card.
 
@@ -254,6 +275,7 @@ class AgentDefinition(BaseModel):
     telemetry: TelemetryConfig | None = None
     thinking: ThinkingConfig | None = None
     oauth: OAuthConfig | None = None
+    icons: IconsConfig | None = None
 
 
 class AgentConfig(BaseSettings):

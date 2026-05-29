@@ -22,7 +22,7 @@ from typing import Any
 
 from a2a.types import AgentCard
 from mcp.server.lowlevel import Server
-from mcp.types import TextContent, Tool
+from mcp.types import Icon, TextContent, Tool
 
 from agentlings.config import AgentConfig
 from agentlings.core.loop import MessageLoop
@@ -37,6 +37,27 @@ from agentlings.core.task import (
 from agentlings.core.telemetry import otel_span
 
 logger = logging.getLogger(__name__)
+
+# Resolutions advertised for each MCP icon. The CDN holds one PNG per size,
+# named ``<base>-<size>.png``; clients pick the best fit for their display.
+ICON_SIZES = (16, 32, 64, 128, 256, 512)
+
+
+def _icon_set(base: str | None) -> list[Icon] | None:
+    """Expand a CDN icon base into one ``Icon`` per size in ``ICON_SIZES``.
+
+    ``base`` is a URL stem (e.g. ``https://cdn/icons/agentling``) to which
+    ``-<size>.png`` is appended. Returns ``None`` when ``base`` is unset so the
+    ``icons`` field is omitted from the MCP payload entirely rather than sent
+    empty.
+    """
+    if not base:
+        return None
+    stem = base.rstrip("/")
+    return [
+        Icon(src=f"{stem}-{size}.png", mimeType="image/png", sizes=[f"{size}x{size}"])
+        for size in ICON_SIZES
+    ]
 
 
 def create_mcp_server(
@@ -54,7 +75,11 @@ def create_mcp_server(
     Returns:
         A configured MCP ``Server`` instance.
     """
-    server = Server(agent_card.name)
+    icons = config.definition.icons
+    server = Server(
+        agent_card.name,
+        icons=_icon_set(icons.server) if icons else None,
+    )
     engine = loop.engine
     await_seconds = float(getattr(config, "agent_task_await_seconds", 60))
 
@@ -87,6 +112,7 @@ def create_mcp_server(
             "required": ["message"],
             "additionalProperties": False,
         },
+        icons=_icon_set(icons.spawn) if icons else None,
     )
 
     get_task_tool = Tool(
@@ -127,6 +153,7 @@ def create_mcp_server(
             "required": ["taskId"],
             "additionalProperties": False,
         },
+        icons=_icon_set(icons.task) if icons else None,
     )
 
     @server.list_tools()
