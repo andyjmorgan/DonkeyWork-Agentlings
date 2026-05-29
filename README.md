@@ -364,18 +364,20 @@ Both documents are generated from the single `oauth` block, so they can never dr
 
 ## Icons
 
-An agentling can advertise PNG **icons** on its MCP surface so clients can show a recognizable image for the server and its tools. Icons ride on the standard MCP `Icon` type — the server's on `serverInfo.icons`, and one set per tool (the spawn tool named after the agent, and its `__get_task` companion).
+An agentling can advertise **icons** on its MCP surface so clients can show a recognizable image for the server and its tools. Icons ride on the standard MCP `Icon` type — the server's on `serverInfo.icons`, and one per tool (the spawn tool named after the agent, and its `__get_task` companion).
 
 Configure with an `icons` block in `agent.yaml`:
 
 ```yaml
 icons:
-  server: https://cdn.example.com/icons/agentling   # MCP serverInfo icon
-  spawn:  https://cdn.example.com/icons/play         # the main (spawn) tool
-  task:   https://cdn.example.com/icons/task         # the __get_task tool
+  server: https://cdn.example.com/icons/agentling.png   # MCP serverInfo icon
+  spawn:  https://cdn.example.com/icons/play.png         # the main (spawn) tool
+  task:   https://cdn.example.com/icons/task.png         # the __get_task tool
 ```
 
-Each value is a **base URL stem**: the framework appends `-<size>.png` for every size in `ICON_SIZES` — **16, 32, 64, 128, 256, 512** — and emits one `Icon` per resolution so clients pick the best fit for their display. So `server: …/agentling` advertises `agentling-16.png` through `agentling-512.png`; host those six PNGs at the corresponding URLs (any public store/CDN, served as `image/png`). Omit a key — or the whole block — to send no icons for that surface.
+Each value is the **full icon URL** — an HTTPS address or a `data:` URI — served as a single icon that the client scales to fit. The MIME type is inferred from the extension (`.png`, `.jpg`/`.jpeg`, `.svg`, `.webp`); `data:` URIs carry their own. PNG and JPEG are universally supported by clients; SVG and WebP are not guaranteed. Omit a key — or the whole block — to send no icon for that surface.
+
+> We advertise **one icon per surface**, not a multi-resolution set. The spec's `icons` array is meant for clients to pick a best-fit size, but real clients (the MCP Inspector among them) render *every* entry side by side — so a single icon is the only thing that displays cleanly today.
 
 ## Memory
 

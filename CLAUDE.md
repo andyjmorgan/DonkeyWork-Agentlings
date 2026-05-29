@@ -81,7 +81,7 @@ All via environment variables (loaded from `.env` via python-dotenv):
 - `AGENT_LOG_LEVEL` (default `INFO`)
 - `AGENT_TASK_AWAIT_SECONDS` (default `60`) — HTTP handler await timeout before yielding a task handle to the caller
 - `AGENT_OAUTH_ISSUER` / `AGENT_OAUTH_AUDIENCE` / `AGENT_OAUTH_JWKS_URI` (optional) — enable OAuth/OIDC bearer-token validation. Setting the issuer turns it on; the agentling acts as a resource server validating JWT signature + `iss`/`aud`/`exp` against the issuer's JWKS (derived from OIDC discovery when `jwks_uri` is unset). The API key and a bearer token are both accepted. Also configurable via an `oauth:` block in the agent YAML. Covers both `/mcp` (RFC 9728 Protected Resource Metadata + `WWW-Authenticate`) and `/a2a` (Agent Card `openIdConnect` scheme).
-- `icons` (agent YAML only) — optional `icons:` block advertising PNG icons on the MCP surface. Keys `server` / `spawn` / `task` are base-URL stems; the framework appends `-<size>.png` for sizes 16/32/64/128/256/512 (`ICON_SIZES`) and emits one MCP `Icon` per size on `serverInfo.icons` and the matching tool. See README "Icons".
+- `icons` (agent YAML only) — optional `icons:` block advertising icons on the MCP surface. Keys `server` / `spawn` / `task` are full icon URLs (HTTPS or `data:` URI); the framework emits a single MCP `Icon` per surface (`serverInfo.icons` and the matching tool) with MIME inferred from the extension. One icon, not a multi-resolution set: real clients (the MCP Inspector included) render every entry in the `icons` array side by side instead of picking a best fit. See README "Icons".
 
 ## Logging
 
