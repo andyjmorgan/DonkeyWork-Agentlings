@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agentlings.config import AgentConfig, SleepConfig
-from agentlings.core.llm import BaseLLMClient, BatchRequest
+from agentlings.core.llm import BaseLLMClient, BatchItemResult, BatchRequest
 from agentlings.core.memory_models import (
     ConsolidatedMemory,
     ConversationSummary,
@@ -169,14 +169,10 @@ class SleepCycle:
         if not batch_requests:
             return [], []
 
-        logger.info("[SLEEP:DEEP] Submitting batch of %d summary requests", len(batch_requests))
-
-        batch_ids = await self._llm.batch_create(batch_requests, model=sleep_model)
-
-        all_results = []
-        for batch_id in batch_ids:
-            results = await self._poll_batch(batch_id)
-            all_results.extend(results)
+        if self._sleep_config.batch:
+            all_results = await self._summarize_batched(batch_requests, sleep_model)
+        else:
+            all_results = await self._summarize_live(batch_requests, sleep_model)
 
         summaries: list[str] = []
         all_candidates: list[MemoryCandidate] = []
@@ -211,6 +207,64 @@ class SleepCycle:
             logger.info("[SLEEP:DEEP] Extracted %d memory candidates", len(all_candidates))
 
         return summaries, all_candidates
+
+    async def _summarize_batched(
+        self,
+        batch_requests: list[BatchRequest],
+        sleep_model: str | None,
+    ) -> list[BatchItemResult]:
+        """Summarize via the Anthropic Message Batches API (50% cost, parallel)."""
+        logger.info(
+            "[SLEEP:DEEP] Submitting batch of %d summary requests", len(batch_requests)
+        )
+        batch_ids = await self._llm.batch_create(batch_requests, model=sleep_model)
+        all_results: list[BatchItemResult] = []
+        for batch_id in batch_ids:
+            all_results.extend(await self._poll_batch(batch_id))
+        return all_results
+
+    async def _summarize_live(
+        self,
+        batch_requests: list[BatchRequest],
+        sleep_model: str | None,
+    ) -> list[BatchItemResult]:
+        """Summarize via sequential live ``complete()`` calls — no batch API.
+
+        Used when ``sleep.batch`` is ``False``. Runs one request at a time so it
+        stays gentle on rate limits and works against backends that lack the
+        batches API (e.g. Ollama). A single request failing is recorded as a
+        failed item rather than aborting the run, mirroring the batch path.
+        """
+        logger.info(
+            "[SLEEP:DEEP] Running %d summary requests live on %s (no batch)",
+            len(batch_requests), sleep_model or "agent default model",
+        )
+        results: list[BatchItemResult] = []
+        for req in batch_requests:
+            try:
+                response = await self._llm.complete(
+                    system=req.system,
+                    messages=req.messages,
+                    tools=[],
+                    output_schema=req.output_schema,
+                    max_tokens=req.max_tokens,
+                    model=sleep_model,
+                )
+                results.append(BatchItemResult(
+                    custom_id=req.custom_id,
+                    content=response.content,
+                    status="succeeded",
+                ))
+            except Exception as e:  # noqa: BLE001 — degrade per-item, never abort
+                logger.exception(
+                    "[SLEEP:DEEP] Live summary failed for %s", req.custom_id
+                )
+                results.append(BatchItemResult(
+                    custom_id=req.custom_id,
+                    status="failed",
+                    error=str(e),
+                ))
+        return results
 
     async def _rem(
         self,
@@ -253,6 +307,7 @@ class SleepCycle:
             tools=[],
             output_schema=strict_json_schema(ConsolidatedMemory),
             max_tokens=self._sleep_config.consolidation_max_tokens,
+            model=self._sleep_config.model,
         )
 
         text = self._extract_structured_text(response.content)

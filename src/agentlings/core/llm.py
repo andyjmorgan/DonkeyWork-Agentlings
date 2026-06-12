@@ -209,6 +209,7 @@ class BaseLLMClient(ABC):
         context_id: str | None = None,
         task_id: str | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         """Send a completion request and return the full response.
 
@@ -225,6 +226,9 @@ class BaseLLMClient(ABC):
             task_id: The task execution this request belongs to. When set, it is
                 forwarded as the ``x-agentling-task-id`` request header so a single
                 task's Messages calls can be isolated within a session.
+            model: Overrides the client's configured model for this call only.
+                Used by the sleep cycle's non-batch path to run summaries on a
+                different model. ``None`` uses the configured model.
 
         Returns:
             The model's response content and stop reason.
@@ -346,10 +350,12 @@ class AnthropicLLMClient(BaseLLMClient):
         context_id: str | None = None,
         task_id: str | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         effective_max_tokens = max_tokens if max_tokens is not None else self._max_tokens
+        use_model = model or self._model
         kwargs: dict[str, Any] = {
-            "model": self._model,
+            "model": use_model,
             "max_tokens": effective_max_tokens,
             "system": system,
             "messages": messages,
@@ -384,7 +390,7 @@ class AnthropicLLMClient(BaseLLMClient):
 
         with otel_span("agentling.llm.complete", {
             "llm.backend": "anthropic",
-            "llm.model": self._model,
+            "llm.model": use_model,
             "llm.max_tokens": effective_max_tokens,
             "llm.message_count": len(messages),
             "llm.tool_count": len(tools or []),
@@ -399,7 +405,7 @@ class AnthropicLLMClient(BaseLLMClient):
             usage = _extract_usage(response.usage)
             usage_total = record_llm_usage(
                 usage,
-                model=self._model,
+                model=use_model,
                 path="live",
             )
             span.set_attribute("llm.duration_seconds", round(duration, 4))
@@ -413,7 +419,7 @@ class AnthropicLLMClient(BaseLLMClient):
                 content=[block.model_dump() for block in response.content],
                 stop_reason=response.stop_reason,
                 usage=usage,
-                model=self._model,
+                model=use_model,
             )
 
     async def stream(
@@ -580,6 +586,8 @@ class MockLLMClient(BaseLLMClient):
         self.last_context_id: str | None = None
         self.last_task_id: str | None = None
         self.last_max_tokens: int | None = None
+        self.last_model: str | None = None
+        self.complete_calls: int = 0
         # Record the thinking config so tests can assert it was threaded
         # through the factory. The mock backend ignores it for behavior.
         self.thinking_config: ThinkingConfig | None = (
@@ -595,11 +603,14 @@ class MockLLMClient(BaseLLMClient):
         context_id: str | None = None,
         task_id: str | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
         self._call_count += 1
+        self.complete_calls += 1
         self.last_context_id = context_id
         self.last_task_id = task_id
         self.last_max_tokens = max_tokens
+        self.last_model = model
         last_message = messages[-1] if messages else {}
         last_text = _extract_text(last_message)
 
