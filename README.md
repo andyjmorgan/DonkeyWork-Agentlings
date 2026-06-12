@@ -449,7 +449,7 @@ Quick check: were there any conversations today? If not, skip everything. No LLM
 
 ### Phase 2: Deep sleep — replay and file
 
-For each conversation from today, the sleep cycle reads the JSONL journal from the last compaction marker and submits all summaries as a single **batch request** to the Anthropic Message Batches API. Batch processing runs at 50% cost and processes in parallel.
+For each conversation from today, the sleep cycle reads the JSONL journal from the last compaction marker and summarizes it. By default all summaries are submitted as a single **batch request** to the Anthropic Message Batches API — 50% cost, processed in parallel, but may sit for up to the poll timeout (2h). Set `batch: false` to instead run each summary as a sequential live `complete()` call: immediate, full price, and usable against backends that lack the batches API (e.g. Ollama). Pair `batch: false` with `model` to summarize on a cheaper/faster model than the agent's live turns use.
 
 Each summary call receives the agent's system prompt (so the agent's persona shapes what it considers important), current memory, and the conversation content. The LLM returns a structured `ConversationSummary` with a narrative and memory candidates.
 
@@ -468,13 +468,19 @@ Deletes conversation JSONL files older than `conversation_retention_days` and jo
 ```yaml
 sleep:
   schedule: "0 2 * * *"           # cron expression (default: 2am daily)
+  batch: true                      # false → sequential live calls, no batches API
   journal_retention_days: 30       # keep journals for 30 days
   conversation_retention_days: 14  # keep JSONL conversations for 14 days
   memory_max_entries: 50           # hard cap after consolidation
-  # model: null                    # override model for sleep calls
+  # model: null                    # override model for sleep calls (batch + live)
   # summary_prompt: null           # override per-conversation summary prompt
   # consolidation_prompt: null     # override REM consolidation prompt
 ```
+
+When `batch: false`, deep-sleep summaries run one at a time via the live Messages
+API instead of the batches API — slower and full price, but it works on backends
+without a batches endpoint and returns immediately. The `model` override applies to
+both the deep-sleep summaries and the REM consolidation call regardless of `batch`.
 
 ### CLI
 

@@ -99,6 +99,83 @@ class TestDeepSleep:
         assert len(summaries) > 0
 
 
+class TestDeepSleepNoBatch:
+    """With ``sleep.batch: false`` the deep-sleep phase must run sequential live
+    ``complete()`` calls and never touch the batches API."""
+
+    @pytest.fixture
+    def no_batch_deps(self, tmp_data_dir: Path, tmp_path: Path):
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: sleep-test-agent\n"
+            "description: A test agent for sleep\n"
+            "tools:\n"
+            "  - bash\n"
+            "sleep:\n"
+            "  batch: false\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="test-key",
+            agent_api_key="test-key",
+            agent_data_dir=tmp_data_dir,
+            agent_llm_backend="mock",
+            agent_config=str(agent_yaml),
+        )
+        store = JournalStore(tmp_data_dir)
+        memory = MemoryFileStore(tmp_data_dir)
+        llm = MockLLMClient(tool_names=[])
+        cycle = SleepCycle(config=config, llm=llm, memory_store=memory, store=store)
+        return cycle, store, llm
+
+    def _seed_conversation(self, store: JournalStore, tmp_data_dir: Path, ctx: str) -> None:
+        store.create(ctx)
+        store.append(ctx, MessageEntry(
+            ctx=ctx, role="user",
+            content=[{"type": "text", "text": "hello agent"}],
+        ))
+        path = tmp_data_dir / ctx / "journal.jsonl"
+        yesterday = datetime.now(timezone.utc) - timedelta(hours=12)
+        import os
+        os.utime(path, (yesterday.timestamp(), yesterday.timestamp()))
+
+    async def test_live_path_calls_complete_not_batch(
+        self, no_batch_deps, tmp_data_dir: Path
+    ) -> None:
+        cycle, store, llm = no_batch_deps
+        self._seed_conversation(store, tmp_data_dir, "ctx-1")
+        self._seed_conversation(store, tmp_data_dir, "ctx-2")
+
+        conversations = cycle._light_sleep(datetime.now(timezone.utc))
+        date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        summaries, _ = await cycle._deep_sleep(conversations, date_str)
+
+        # One live completion per conversation, and no batch was ever submitted.
+        assert llm.complete_calls == 2
+        assert llm._batch_store == {}
+        # The configured sleep model override is forwarded to complete().
+        assert llm.last_model == "claude-haiku-4-5"
+        # Journal still produced.
+        assert (tmp_data_dir / "journals" / f"{date_str}.md").exists()
+        assert len(summaries) == 2
+
+    async def test_batch_default_uses_batch_api(
+        self, sleep_deps, tmp_data_dir: Path
+    ) -> None:
+        """The default config (batch unset) must still go through the batch API
+        and not fall back to live calls — guards against flipping the default."""
+        cycle, store, _, _ = sleep_deps
+        llm = cycle._llm  # the MockLLMClient from the default sleep_deps fixture
+        self._seed_conversation(store, tmp_data_dir, "ctx-1")
+
+        conversations = cycle._light_sleep(datetime.now(timezone.utc))
+        date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        await cycle._deep_sleep(conversations, date_str)
+
+        assert llm.complete_calls == 0
+        assert len(llm._batch_store) == 1
+
+
 class TestHousekeeping:
     def test_deletes_old_conversations(self, sleep_deps, tmp_data_dir: Path) -> None:
         cycle, _, _, _ = sleep_deps

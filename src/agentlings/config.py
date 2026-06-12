@@ -42,6 +42,13 @@ class SleepConfig(BaseModel):
         enabled: When ``False``, the sleep cycle is not scheduled even if
             the block is present. Set this for backends that lack the
             Anthropic batches API (e.g. Ollama's compatibility layer).
+        batch: When ``True`` (default), deep-sleep summaries are submitted to
+            the Anthropic Message Batches API (50% cost, parallel, but may sit
+            for up to the poll timeout). When ``False``, each summary is run as
+            a sequential live ``complete()`` call instead — immediate, full
+            price, and usable against backends without a batches API (e.g.
+            Ollama). Combine with ``model`` to run sleep on a cheaper/faster
+            model than the agent uses for live turns.
         schedule: Cron expression for when to run (default 2am daily).
         journal_retention_days: How long to keep journal files.
         conversation_retention_days: How long to keep JSONL conversation files.
@@ -58,6 +65,7 @@ class SleepConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
+    batch: bool = True
     schedule: str = "0 2 * * *"
     journal_retention_days: int = 30
     conversation_retention_days: int = 14
