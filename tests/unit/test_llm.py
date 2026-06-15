@@ -11,6 +11,7 @@ from agentlings.core.llm import (
     ANTHROPIC_BETA_HEADER,
     CONTEXT_ID_HEADER,
     NAME_HEADER,
+    SLEEP_CYCLE_HEADER,
     TASK_ID_HEADER,
     AnthropicLLMClient,
     MockLLMClient,
@@ -187,6 +188,85 @@ class TestContextIdHeader:
         )
         assert client.last_context_id == "ctx-xyz"
         assert client.last_task_id == "task-xyz"
+
+
+class TestSleepCycleHeader:
+    """The ``Agentling-SleepCycle`` header marks every LLM request the nightly
+    sleep cycle makes so a gateway/proxy can isolate it from task traffic.
+    """
+
+    def _stub_client(self) -> tuple[AnthropicLLMClient, AsyncMock]:
+        response = MagicMock()
+        response.content = []
+        response.stop_reason = "end_turn"
+        response.usage = None
+        create = AsyncMock(return_value=response)
+        mock_client = MagicMock()
+        mock_client.messages.create = create
+
+        client = AnthropicLLMClient.__new__(AnthropicLLMClient)
+        client._client = mock_client
+        client._model = "claude-sonnet-4-6"
+        client._max_tokens = 128
+        return client, create
+
+    @pytest.mark.asyncio
+    async def test_header_set_when_sleep_cycle(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(system=[], messages=[], tools=[], sleep_cycle=True)
+
+        extra_headers = create.await_args.kwargs["extra_headers"]
+        assert extra_headers == {SLEEP_CYCLE_HEADER: "true"}
+
+    @pytest.mark.asyncio
+    async def test_no_header_when_not_sleep_cycle(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(system=[], messages=[], tools=[])
+
+        assert "extra_headers" not in create.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_header_coexists_with_context_id(self) -> None:
+        client, create = self._stub_client()
+
+        await client.complete(
+            system=[], messages=[], tools=[],
+            context_id="ctx-1", sleep_cycle=True,
+        )
+
+        extra_headers = create.await_args.kwargs["extra_headers"]
+        assert extra_headers == {
+            CONTEXT_ID_HEADER: "ctx-1",
+            SLEEP_CYCLE_HEADER: "true",
+        }
+
+    @pytest.mark.asyncio
+    async def test_batch_create_always_stamps_header(self) -> None:
+        from agentlings.core.llm import BatchRequest
+
+        client, _ = self._stub_client()
+        batch_create = AsyncMock(return_value=MagicMock(id="batch_1"))
+        client._client.messages.batches.create = batch_create
+
+        await client.batch_create([
+            BatchRequest(custom_id="c1", system=[], messages=[]),
+        ])
+
+        extra_headers = batch_create.await_args.kwargs["extra_headers"]
+        assert extra_headers == {SLEEP_CYCLE_HEADER: "true"}
+
+    @pytest.mark.asyncio
+    async def test_mock_records_last_sleep_cycle(self) -> None:
+        client = MockLLMClient()
+        await client.complete(
+            system=[],
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            tools=[],
+            sleep_cycle=True,
+        )
+        assert client.last_sleep_cycle is True
 
 
 class TestNameHeader:

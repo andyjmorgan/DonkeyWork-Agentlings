@@ -249,6 +249,7 @@ class SleepCycle:
                     output_schema=req.output_schema,
                     max_tokens=req.max_tokens,
                     model=sleep_model,
+                    sleep_cycle=True,
                 )
                 results.append(BatchItemResult(
                     custom_id=req.custom_id,
@@ -308,6 +309,7 @@ class SleepCycle:
             output_schema=strict_json_schema(ConsolidatedMemory),
             max_tokens=self._sleep_config.consolidation_max_tokens,
             model=self._sleep_config.model,
+            sleep_cycle=True,
         )
 
         text = self._extract_structured_text(response.content)
