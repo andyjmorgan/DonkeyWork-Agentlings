@@ -114,6 +114,11 @@ def _warn_if_mode_mismatches_model(mode: str, model: str) -> None:
 CONTEXT_ID_HEADER = "x-agentling-context-id"
 TASK_ID_HEADER = "x-agentling-task-id"
 NAME_HEADER = "x-agentling-name"
+# Stamped on every LLM request the nightly sleep cycle makes (live summaries,
+# memory consolidation, and batch submissions) so gateways/proxies can single
+# out sleep-cycle traffic from interactive task traffic. Value is the constant
+# ``"true"`` so a gateway rule can match on equality rather than presence.
+SLEEP_CYCLE_HEADER = "Agentling-SleepCycle"
 
 # Matches ``delay-<seconds>`` in mock user messages — used by integration
 # tests to produce genuinely slow responses without global configuration.
@@ -210,6 +215,7 @@ class BaseLLMClient(ABC):
         task_id: str | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        sleep_cycle: bool = False,
     ) -> LLMResponse:
         """Send a completion request and return the full response.
 
@@ -229,6 +235,10 @@ class BaseLLMClient(ABC):
             model: Overrides the client's configured model for this call only.
                 Used by the sleep cycle's non-batch path to run summaries on a
                 different model. ``None`` uses the configured model.
+            sleep_cycle: When ``True``, the request is part of the nightly sleep
+                cycle. It is stamped with the ``Agentling-SleepCycle`` request
+                header and an ``agentling.sleep_cycle`` span attribute so
+                gateways and traces can isolate sleep traffic.
 
         Returns:
             The model's response content and stop reason.
@@ -351,6 +361,7 @@ class AnthropicLLMClient(BaseLLMClient):
         task_id: str | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        sleep_cycle: bool = False,
     ) -> LLMResponse:
         effective_max_tokens = max_tokens if max_tokens is not None else self._max_tokens
         use_model = model or self._model
@@ -383,6 +394,8 @@ class AnthropicLLMClient(BaseLLMClient):
             extra_headers[CONTEXT_ID_HEADER] = context_id
         if task_id:
             extra_headers[TASK_ID_HEADER] = task_id
+        if sleep_cycle:
+            extra_headers[SLEEP_CYCLE_HEADER] = "true"
         if beta_header:
             extra_headers[ANTHROPIC_BETA_HEADER] = beta_header
         if extra_headers:
@@ -397,6 +410,7 @@ class AnthropicLLMClient(BaseLLMClient):
             "llm.has_output_schema": bool(output_schema),
             "llm.context_id": context_id or "",
             "llm.task_id": task_id or "",
+            "agentling.sleep_cycle": sleep_cycle,
         }) as span:
             start = time.monotonic()
             response = await self._client.messages.create(**kwargs)
@@ -455,6 +469,7 @@ class AnthropicLLMClient(BaseLLMClient):
             "llm.backend": "anthropic",
             "llm.model": use_model,
             "llm.batch.request_count": len(requests),
+            "agentling.sleep_cycle": True,
         }) as span:
             thinking_cfg = getattr(self, "_thinking", None)
             for i in range(0, len(requests), BATCH_MAX_REQUESTS):
@@ -494,7 +509,10 @@ class AnthropicLLMClient(BaseLLMClient):
                         )
                     )
 
-                result = await self._client.messages.batches.create(requests=api_requests)
+                result = await self._client.messages.batches.create(
+                    requests=api_requests,
+                    extra_headers={SLEEP_CYCLE_HEADER: "true"},
+                )
                 batch_ids.append(result.id)
                 logger.info("batch submitted: %s (%d requests)", result.id, len(chunk))
 
@@ -587,6 +605,7 @@ class MockLLMClient(BaseLLMClient):
         self.last_task_id: str | None = None
         self.last_max_tokens: int | None = None
         self.last_model: str | None = None
+        self.last_sleep_cycle: bool = False
         self.complete_calls: int = 0
         # Record the thinking config so tests can assert it was threaded
         # through the factory. The mock backend ignores it for behavior.
@@ -604,6 +623,7 @@ class MockLLMClient(BaseLLMClient):
         task_id: str | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        sleep_cycle: bool = False,
     ) -> LLMResponse:
         self._call_count += 1
         self.complete_calls += 1
@@ -611,6 +631,7 @@ class MockLLMClient(BaseLLMClient):
         self.last_task_id = task_id
         self.last_max_tokens = max_tokens
         self.last_model = model
+        self.last_sleep_cycle = sleep_cycle
         last_message = messages[-1] if messages else {}
         last_text = _extract_text(last_message)
 
@@ -637,6 +658,7 @@ class MockLLMClient(BaseLLMClient):
             "llm.tool_count": len(tools or []),
             "llm.context_id": context_id or "",
             "llm.task_id": task_id or "",
+            "agentling.sleep_cycle": sleep_cycle,
         }) as span:
             if last_message.get("role") == "tool":
                 response = LLMResponse(

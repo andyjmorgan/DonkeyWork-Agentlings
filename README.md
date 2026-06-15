@@ -455,6 +455,8 @@ Each summary call receives the agent's system prompt (so the agent's persona sha
 
 Results are written to `data/journals/YYYY-MM-DD.md`.
 
+Every LLM request the sleep cycle makes — deep-sleep summaries (live or batch) and the REM consolidation call — carries an `Agentling-SleepCycle: true` request header and an `agentling.sleep_cycle` span attribute, so a gateway or trace backend can isolate sleep-cycle traffic from interactive task turns.
+
 ### Phase 3: REM — integrate and prune
 
 A single LLM call receives current memory, today's journal, and all extracted memory candidates. It integrates new facts, deduplicates, reviews existing entries for staleness, and returns a `ConsolidatedMemory` — the complete updated memory store. Written atomically to `memory.json`.
