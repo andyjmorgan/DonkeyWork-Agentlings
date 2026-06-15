@@ -38,21 +38,39 @@ Extract any facts worth adding to your long-term memory. Only extract NEW facts 
 not already in your current memory. Focus on operational knowledge, patterns, \
 decisions, things that changed. Ignore passing context.
 
+Each candidate must be ONE self-contained fact of at most ~60 words; split \
+multi-topic findings into separate candidates.
+
+NEVER record secret values — API keys, tokens, passwords, access keys. Record \
+only WHERE the credential lives (a secret store / vault reference), never the \
+literal value.
+
 If the conversation was trivial or contained nothing new worth remembering, \
 return an empty memory_candidates list."""
 
 DEFAULT_CONSOLIDATION_PROMPT = """\
-You are performing nightly memory maintenance.
+You are performing nightly memory maintenance. The date of the conversations \
+under review is stated in the message below.
 
 Your job:
-1. Integrate new candidates that add genuine value. Deduplicate against existing entries.
+1. Integrate new candidates that add genuine value. Deduplicate against existing \
+entries, and MERGE multiple entries about the same component into a single entry.
 2. Review every existing entry. Is it still relevant? Has it been superseded by \
 something learned today? Would it help you do your job tomorrow?
-3. Drop anything that is stale, redundant, or no longer operationally useful.
-4. You have a hard limit of {memory_max_entries} entries.
+3. Drop anything stale, redundant, or no longer operationally useful. Exclude \
+pure implementation trivia (library internals, exact schemas, code paths) unless \
+tied to an unresolved incident — that detail lives in the source, not memory.
+4. You MUST return at most {memory_max_entries} entries. If integrating new \
+candidates would exceed the limit, rank every entry by future operational value \
+and drop the lowest-value entries until you are under the cap.
 
-Preserve the recorded timestamp for entries you keep unchanged.
-Set recorded to the current date for new or modified entries."""
+NEVER store secret values — API keys, tokens, passwords, access keys. If an \
+existing entry contains a literal secret, REWRITE it in place to a reference \
+describing where the credential lives, keeping the rest of the entry intact.
+
+Do NOT invent or advance dates. Preserve the recorded timestamp for entries you \
+keep unchanged. For new or modified entries, set recorded to the review date \
+stated in the message — never a future or guessed date."""
 
 
 class SleepCycle:
@@ -297,6 +315,7 @@ class SleepCycle:
         system = build_system_prompt(self._config)
         user_content = (
             f"{consolidation_prompt}\n\n"
+            f"Date of the conversations under review: {date_str}\n\n"
             f"Current memory:\n{memory_text}\n\n"
             f"Today's journal:\n{journal_text}\n\n"
             f"New candidates:\n{candidates_text}"
