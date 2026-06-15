@@ -351,3 +351,32 @@ class TestRemTokenBudget:
         assert llm.last_max_tokens == budget, (
             "REM must request the configured consolidation_max_tokens, not the default"
         )
+
+
+class TestRemDateInjection:
+    """REM must hand the model the review date so it never guesses (which produced
+    future-dated `recorded` timestamps in the wild)."""
+
+    async def test_rem_includes_review_date_in_message(
+        self, sleep_config: AgentConfig, tmp_data_dir: Path
+    ) -> None:
+        store = JournalStore(tmp_data_dir)
+        memory = MemoryFileStore(tmp_data_dir)
+        llm = MockLLMClient(tool_names=[])
+        captured: dict[str, object] = {}
+        original = llm.complete
+
+        async def spy(*args, **kwargs):  # noqa: ANN002, ANN003
+            captured["messages"] = kwargs.get("messages")
+            return await original(*args, **kwargs)
+
+        llm.complete = spy  # type: ignore[method-assign]
+        cycle = SleepCycle(config=sleep_config, llm=llm, memory_store=memory, store=store)
+
+        await cycle._rem(
+            summaries=["### ctx-1\na summary"], candidates=[], date_str="2026-05-26"
+        )
+
+        content = captured["messages"][0]["content"]  # type: ignore[index]
+        assert "2026-05-26" in content
+        assert "under review" in content.lower()
