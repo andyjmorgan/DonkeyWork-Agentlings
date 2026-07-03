@@ -18,6 +18,11 @@ case the executor passes ``await_seconds=0`` to the engine and a ``Task``
 object is enqueued without blocking.
 
 Cancellation (``CancelTask``) hits the engine's cancel path by task id.
+Engine cancellation is cooperative — the worker observes the flag at its
+next checkpoint — so the executor waits up to ``AGENT_TASK_AWAIT_SECONDS``
+for the task to reach a terminal state before answering; the A2A SDK only
+reports a successful cancel when the returned Task is already
+``TASK_STATE_CANCELED``.
 """
 
 from __future__ import annotations
@@ -364,6 +369,22 @@ class AgentlingExecutor(AgentExecutor):
         ``RequestContext.task_id`` is populated from the inbound request,
         which (for our clients) is the engine's task_id — the Task object
         enqueued on the slow path carries that id directly.
+
+        Engine cancellation is cooperative: ``engine.cancel`` flips a flag
+        that the worker observes at its next checkpoint, so the state it
+        returns is usually still ``cancelling`` (mapped to
+        ``TASK_STATE_WORKING`` on the wire). The SDK's ``on_cancel_task``
+        treats anything other than ``TASK_STATE_CANCELED`` as a failed
+        cancel, so after requesting cancellation we wait up to the
+        configured await window for the task to actually reach a terminal
+        state and enqueue that. If the task raced to completion instead,
+        the terminal state is reported honestly and the SDK surfaces
+        ``TaskNotCancelableError`` to the client.
+
+        The result is enqueued as a ``TaskStatusUpdateEvent`` (matching the
+        SDK's own ``TaskUpdater.cancel``) — enqueueing a full ``Task`` is
+        discarded by the SDK's task manager as an attempted task
+        replacement, since the task already exists in the store.
         """
         task_id = context.task_id
         with otel_span("agentling.a2a.cancel", {
@@ -384,6 +405,15 @@ class AgentlingExecutor(AgentExecutor):
 
             try:
                 state = await self._engine.cancel(task_id=task_id)
+                if state.status not in TERMINAL_STATUSES:
+                    # Cooperative cancel accepted but not yet observed —
+                    # wait for the worker to hit its next checkpoint and
+                    # write the terminal markers.
+                    state = await self._engine.poll(
+                        task_id=task_id,
+                        wait_seconds=self._await_seconds,
+                        cap_seconds=self._await_seconds,
+                    )
             except TaskNotFoundError:
                 span.set_attribute("a2a.outcome", "not_found")
                 await event_queue.enqueue_event(
@@ -407,9 +437,20 @@ class AgentlingExecutor(AgentExecutor):
                 return
 
             span.set_attribute("task.status", state.status.value)
-            span.set_attribute("a2a.outcome", "cancelled")
-            # Enqueue the updated Task so the SDK relays the cancelled state.
-            await event_queue.enqueue_event(task_state_to_a2a_task(state))
+            span.set_attribute(
+                "a2a.outcome",
+                "cancelled"
+                if state.status == TaskStatus.CANCELLED
+                else f"cancel_{state.status.value}",
+            )
+            # Enqueue a status update so the SDK relays the cancelled state.
+            await event_queue.enqueue_event(
+                TaskStatusUpdateEvent(
+                    task_id=state.task_id,
+                    context_id=state.context_id,
+                    status=task_state_to_a2a_task(state).status,
+                )
+            )
             await event_queue.close()
 
 
