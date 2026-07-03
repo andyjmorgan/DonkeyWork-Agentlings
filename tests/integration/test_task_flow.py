@@ -186,20 +186,49 @@ class TestA2ANativeTaskFlow:
         )
 
     @pytest.mark.asyncio
-    async def test_cancel_task_routes_to_engine(
+    async def test_cancel_working_task_returns_canceled_task(
         self, slow_a2a_client: A2ATestClient
     ) -> None:
-        result = await slow_a2a_client.send("hi")
+        """A ``tasks/cancel`` against a working task must succeed and return
+        the task in ``canceled`` state.
+
+        ``delay-3`` outlasts the server's 2s await window, so the send
+        yields a working task; the worker observes the cooperative cancel
+        flag when the mock LLM's delay elapses (~1s after the cancel), well
+        inside the cancel handler's own await window.
+        """
+        result = await slow_a2a_client.send("delay-3 long running work")
         assert isinstance(result, A2AResponse)
         task_id = result.raw["task_id"]
         assert task_id is not None
+        assert result.raw["task_state"] == "working"
 
         cancel_resp = await slow_a2a_client.cancel_task(task_id)
-        # Either the task was already terminal (cannot cancel → error) or the
-        # cancel succeeded and returned the cancelled task. Both are valid
-        # depending on timing; what matters is the wire works and we don't
-        # crash.
-        assert "result" in cancel_resp or "error" in cancel_resp
+        task_obj = cancel_resp.get("result")
+        assert task_obj is not None, f"cancel was rejected: {cancel_resp}"
+        assert task_obj["id"] == task_id
+        assert task_obj["status"]["state"] == "canceled"
+
+        # GetTask must agree that the task is terminally cancelled.
+        get_resp = await slow_a2a_client.get_task(task_id)
+        assert get_resp["result"]["status"]["state"] == "canceled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_task_yields_error(
+        self, slow_a2a_client: A2ATestClient
+    ) -> None:
+        """Cancelling an already-completed task is rejected per the A2A spec
+        (``TaskNotCancelableError``), not silently accepted."""
+        result = await slow_a2a_client.send("hello")
+        assert isinstance(result, A2AResponse)
+        task_id = result.raw["task_id"]
+        assert task_id is not None
+        assert result.raw["task_state"] == "completed"
+
+        cancel_resp = await slow_a2a_client.cancel_task(task_id)
+        assert "error" in cancel_resp, (
+            f"cancel of terminal task should error: {cancel_resp}"
+        )
 
 
 async def _poll_until_terminal(
