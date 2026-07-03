@@ -73,6 +73,13 @@ telemetry:
   # headers:
   #   Authorization: "Bearer your-token"
 
+# a2a:
+#   # A2A message/stream support. Off by default. Can also be enabled at
+#   # runtime with AGENT_A2A_STREAMING=true and
+#   # AGENT_A2A_TOOL_PROGRESS_SUMMARIES=true.
+#   streaming: true
+#   tool_progress_summaries: true
+
 # oauth:
 #   # OAuth 2.0 bearer-token validation (resource server). Off unless `enabled`
 #   # is set or AGENT_OAUTH_ISSUER is present. The API key and a bearer token are

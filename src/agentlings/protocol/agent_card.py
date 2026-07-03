@@ -5,6 +5,7 @@ from __future__ import annotations
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentInterface,
     AgentSkill,
     APIKeySecurityScheme,
@@ -14,8 +15,14 @@ from a2a.types import (
     StringList,
 )
 from a2a.utils.constants import PROTOCOL_VERSION_1_0, TransportProtocol
+from google.protobuf.struct_pb2 import Struct
 
 from agentlings.config import AgentConfig
+
+
+TOOL_PROGRESS_EXTENSION_URI = (
+    "https://donkeywork.dev/a2a/extensions/tool-progress/v1"
+)
 
 
 def generate_agent_card(config: AgentConfig) -> AgentCard:
@@ -82,6 +89,23 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
             SecurityRequirement(schemes={"oidc": StringList(list=[])})
         )
 
+    extensions: list[AgentExtension] = []
+    if config.a2a_config.tool_progress_summaries:
+        params = Struct()
+        params.update({
+            "summaryField": "agentling_action_summary",
+            "event": "TaskStatusUpdateEvent",
+            "metadataKey": "agentling",
+        })
+        extensions.append(AgentExtension(
+            uri=TOOL_PROGRESS_EXTENSION_URI,
+            description=(
+                "Streams model-authored progress summaries for tool execution."
+            ),
+            required=False,
+            params=params,
+        ))
+
     return AgentCard(
         name=config.agent_name,
         description=config.agent_description,
@@ -94,7 +118,11 @@ def generate_agent_card(config: AgentConfig) -> AgentCard:
             ),
         ],
         skills=skills,
-        capabilities=AgentCapabilities(streaming=False, push_notifications=False),
+        capabilities=AgentCapabilities(
+            streaming=config.a2a_config.streaming,
+            push_notifications=False,
+            extensions=extensions,
+        ),
         default_input_modes=["text"],
         default_output_modes=["text"],
         security_schemes=security_schemes,

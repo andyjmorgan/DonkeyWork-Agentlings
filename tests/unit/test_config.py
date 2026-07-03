@@ -21,6 +21,8 @@ def _clear_oauth_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "AGENT_OAUTH_ISSUER",
         "AGENT_OAUTH_AUDIENCE",
         "AGENT_OAUTH_JWKS_URI",
+        "AGENT_A2A_STREAMING",
+        "AGENT_A2A_TOOL_PROGRESS_SUMMARIES",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -322,6 +324,47 @@ class TestAgentDefinition:
         assert defn.memory is None
         assert defn.sleep is None
         assert defn.telemetry is None
+        assert defn.a2a is None
+
+    def test_a2a_config_from_yaml(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: a2a-agent\n"
+            "description: A2A agent\n"
+            "a2a:\n"
+            "  streaming: true\n"
+            "  tool_progress_summaries: true\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+        )
+        assert config.a2a_config.streaming is True
+        assert config.a2a_config.tool_progress_summaries is True
+
+    def test_a2a_config_env_overrides_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: a2a-agent\n"
+            "a2a:\n"
+            "  streaming: false\n"
+            "  tool_progress_summaries: false\n"
+        )
+        monkeypatch.setenv("AGENT_A2A_STREAMING", "true")
+        monkeypatch.setenv("AGENT_A2A_TOOL_PROGRESS_SUMMARIES", "true")
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+            _env_file=None,
+        )
+        assert config.a2a_config.streaming is True
+        assert config.a2a_config.tool_progress_summaries is True
 
     def test_bash_timeout_default(self) -> None:
         defn = AgentDefinition()

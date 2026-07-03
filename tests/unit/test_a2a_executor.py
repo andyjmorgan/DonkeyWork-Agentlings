@@ -21,10 +21,11 @@ from a2a.types import (
     SendMessageConfiguration,
     SendMessageRequest,
     Task,
+    TaskStatusUpdateEvent,
 )
 from a2a.types import TaskState as A2ATaskState
 
-from agentlings.config import AgentConfig
+from agentlings.config import A2AConfig, AgentConfig
 from agentlings.core.llm import LLMResponse
 from agentlings.core.store import JournalStore
 from agentlings.core.task import TaskEngine
@@ -290,3 +291,127 @@ class TestReturnImmediately:
         assert isinstance(events[0], Message), (
             f"fast path should return Message, got {type(events[0]).__name__}"
         )
+
+
+class TestStreamingExecution:
+    @pytest.mark.asyncio
+    async def test_streaming_yields_working_task_then_final_task(
+        self,
+        slow_engine: tuple[TaskEngine, ControllableLLM],
+        test_config: AgentConfig,
+    ) -> None:
+        """A2A ``message/stream`` skips the await timer and observes the
+        durable task until terminal state."""
+        engine, llm = slow_engine
+        test_config.agent_task_await_seconds = 30
+        test_config._definition.a2a = A2AConfig(streaming=True)  # noqa: SLF001
+        loop = _LoopShim(engine)
+        executor = AgentlingExecutor(loop, test_config)
+
+        ctx = _make_request_context(
+            text="hello",
+            context_id="ctx-stream",
+            task_id="task-stream",
+            return_immediately=None,
+        )
+        ctx.call_context.state["method"] = "SendStreamingMessage"
+        queue = EventQueue()
+
+        start = asyncio.get_event_loop().time()
+        execute_task = asyncio.create_task(executor.execute(ctx, queue))
+
+        first = await asyncio.wait_for(queue.dequeue_event(), timeout=2.0)
+        queue.task_done()
+        elapsed = asyncio.get_event_loop().time() - start
+        assert elapsed < 1.0, (
+            f"streaming did not yield the task immediately ({elapsed:.3f}s)"
+        )
+        assert isinstance(first, Task)
+        assert first.id == "task-stream"
+        assert first.context_id == "ctx-stream"
+        assert first.status.state == A2ATaskState.TASK_STATE_WORKING
+        assert not execute_task.done()
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "stream done"}],
+            stop_reason="end_turn",
+        ))
+
+        final = await asyncio.wait_for(queue.dequeue_event(), timeout=3.0)
+        queue.task_done()
+        assert isinstance(final, Task)
+        assert final.id == "task-stream"
+        assert final.context_id == "ctx-stream"
+        assert final.status.state == A2ATaskState.TASK_STATE_COMPLETED
+
+        await asyncio.wait_for(execute_task, timeout=3.0)
+
+    @pytest.mark.asyncio
+    async def test_streaming_emits_tool_progress_status_with_metadata(
+        self,
+        slow_engine: tuple[TaskEngine, ControllableLLM],
+        test_config: AgentConfig,
+    ) -> None:
+        engine, llm = slow_engine
+        test_config._definition.a2a = A2AConfig(  # noqa: SLF001
+            streaming=True,
+            tool_progress_summaries=True,
+        )
+        loop = _LoopShim(engine)
+        executor = AgentlingExecutor(loop, test_config)
+
+        llm.push(LLMResponse(
+            content=[{
+                "type": "tool_use",
+                "id": "toolu_progress",
+                "name": "missing_tool",
+                "input": {
+                    "agentling_action_summary": "Checking the remote agent status",
+                },
+            }],
+            stop_reason="tool_use",
+        ))
+
+        ctx = _make_request_context(
+            text="use a tool",
+            context_id="ctx-progress",
+            task_id="task-progress",
+            return_immediately=None,
+        )
+        ctx.call_context.state["method"] = "SendStreamingMessage"
+        queue = EventQueue()
+        execute_task = asyncio.create_task(executor.execute(ctx, queue))
+
+        first = await asyncio.wait_for(queue.dequeue_event(), timeout=2.0)
+        queue.task_done()
+        assert isinstance(first, Task)
+        assert first.status.state == A2ATaskState.TASK_STATE_WORKING
+
+        progress = await asyncio.wait_for(queue.dequeue_event(), timeout=2.0)
+        queue.task_done()
+        assert isinstance(progress, TaskStatusUpdateEvent)
+        assert progress.task_id == "task-progress"
+        assert progress.context_id == "ctx-progress"
+        assert progress.status.message.parts[0].text == "Checking the remote agent status"
+        metadata = progress.metadata["agentling"]
+        assert metadata["type"] == "tool_call"
+        assert metadata["tool_call_id"] == "toolu_progress"
+        assert metadata["status"] == "EXECUTING"
+        assert metadata["tool_name"] == "missing_tool"
+        assert metadata["description"] == "Checking the remote agent status"
+
+        llm.push(LLMResponse(
+            content=[{"type": "text", "text": "done after progress"}],
+            stop_reason="end_turn",
+        ))
+
+        # A completed tool progress event may arrive before the terminal Task.
+        while True:
+            event = await asyncio.wait_for(queue.dequeue_event(), timeout=3.0)
+            queue.task_done()
+            if isinstance(event, Task):
+                final = event
+                break
+
+        assert final.status.state == A2ATaskState.TASK_STATE_COMPLETED
+        await asyncio.wait_for(execute_task, timeout=3.0)

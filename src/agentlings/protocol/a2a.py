@@ -7,6 +7,11 @@ A2A ``Task`` object (``status.state == working``) is enqueued so the caller
 can poll via ``GetTask`` — those GetTask calls are routed back to our engine
 by ``EngineTaskStore`` so the SDK's answers always reflect live state.
 
+When A2A streaming is enabled, ``message/stream`` skips the await window,
+enqueues the working Task immediately, then observes the durable engine task
+until terminal state and enqueues the final Task. Client disconnects only drop
+the stream observer; the underlying task keeps running.
+
 Clients can opt out of the await window per-request by setting
 ``configuration.return_immediately = true`` on ``message/send``; in that
 case the executor passes ``await_seconds=0`` to the engine and a ``Task``
@@ -19,17 +24,26 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from a2a.helpers.proto_helpers import new_text_message
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import Message, Role
+from a2a.types import (
+    Message,
+    Role,
+    TaskState as A2ATaskState,
+    TaskStatus as A2ATaskStatus,
+    TaskStatusUpdateEvent,
+)
+from google.protobuf.struct_pb2 import Struct
 
 from agentlings.config import AgentConfig
 from agentlings.core.loop import MessageLoop
 from agentlings.core.task import (
     ContextBusyError,
+    TERMINAL_STATUSES,
     TaskNotFoundError,
     TaskState,
     TaskStatus,
@@ -60,6 +74,31 @@ def _agent_text_message(
     )
 
 
+def _progress_status_update(progress: Any) -> TaskStatusUpdateEvent:
+    """Render internal tool progress as an A2A task status update."""
+    metadata = Struct()
+    if progress.data:
+        metadata.update({
+            "agentling": {
+                "extension": "https://donkeywork.dev/a2a/extensions/tool-progress/v1",
+                **progress.data,
+            }
+        })
+    return TaskStatusUpdateEvent(
+        task_id=progress.task_id,
+        context_id=progress.context_id,
+        status=A2ATaskStatus(
+            state=A2ATaskState.TASK_STATE_WORKING,
+            message=_agent_text_message(
+                progress.text or "Task progress updated",
+                context_id=progress.context_id,
+                task_id=progress.task_id,
+            ),
+        ),
+        metadata=metadata,
+    )
+
+
 class AgentlingExecutor(AgentExecutor):
     """Executes A2A requests by forwarding user input through the shared task engine."""
 
@@ -67,6 +106,7 @@ class AgentlingExecutor(AgentExecutor):
         self._loop = loop
         self._engine = loop.engine
         self._await_seconds = float(config.agent_task_await_seconds)
+        self._streaming_enabled = config.a2a_config.streaming
 
     async def execute(
         self, context: RequestContext, event_queue: EventQueue
@@ -77,6 +117,10 @@ class AgentlingExecutor(AgentExecutor):
         ``Task`` object (slow path, still working) depending on whether the
         task finished within the configured await window.
         """
+        if self._is_streaming_request(context) and self._streaming_enabled:
+            await self._execute_streaming(context, event_queue)
+            return
+
         user_text = context.get_user_input()
         context_id = context.context_id
         # The A2A SDK generates a task_id for every inbound SendMessage. We
@@ -164,6 +208,112 @@ class AgentlingExecutor(AgentExecutor):
                 state.context_id, state.status.value, state.task_id,
             )
             await event_queue.close()
+
+    def _is_streaming_request(self, context: RequestContext) -> bool:
+        """Whether this executor call came from A2A ``message/stream``."""
+        return (
+            context.call_context.state.get("method") == "SendStreamingMessage"
+        )
+
+    async def _execute_streaming(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        """Handle A2A ``message/stream`` as a live observer of an engine task.
+
+        The stream path deliberately uses ``await_seconds=0`` and then waits on
+        internal progress notifications. That keeps the durable task as the
+        source of truth and prevents client disconnect from owning task
+        lifecycle; cancellation remains explicit via ``tasks/cancel``.
+        """
+        user_text = context.get_user_input()
+        context_id = context.context_id
+        sdk_task_id = context.task_id
+
+        logger.debug(
+            "a2a streaming execute: context_id=%s task_id=%s text=%r",
+            context_id,
+            sdk_task_id,
+            (user_text or "")[:100],
+        )
+
+        subscription = (
+            self._engine.subscribe(sdk_task_id) if sdk_task_id else None
+        )
+        with otel_span("agentling.a2a.execute", {
+            "agent.via": "a2a",
+            "task.context_id": context_id or "",
+            "task.id": sdk_task_id or "",
+            "a2a.streaming": True,
+            "a2a.message_chars": len(user_text or ""),
+        }) as span:
+            try:
+                state = await self._engine.spawn(
+                    message=user_text,
+                    context_id=context_id,
+                    via="a2a",
+                    await_seconds=0.0,
+                    task_id=sdk_task_id,
+                )
+            except ContextBusyError as e:
+                span.set_attribute("a2a.outcome", "context_busy")
+                if subscription is not None:
+                    subscription.close()
+                await event_queue.enqueue_event(
+                    _agent_text_message(
+                        _format_busy(e),
+                        context_id=context_id,
+                    )
+                )
+                await event_queue.close()
+                return
+            except Exception:  # noqa: BLE001
+                span.set_attribute("a2a.outcome", "exception")
+                logger.exception("error processing streaming A2A message")
+                if subscription is not None:
+                    subscription.close()
+                await event_queue.enqueue_event(
+                    _agent_text_message(
+                        "Internal error processing request.",
+                        context_id=context_id,
+                    )
+                )
+                await event_queue.close()
+                return
+
+            try:
+                span.set_attribute("task.status", state.status.value)
+                if subscription is None:
+                    subscription = self._engine.subscribe(state.task_id)
+                await event_queue.enqueue_event(task_state_to_a2a_task(state))
+
+                if state.status in TERMINAL_STATUSES:
+                    span.set_attribute("a2a.outcome", "completed")
+                    return
+
+                if subscription is not None:
+                    async for progress in subscription:
+                        if progress.kind.startswith("tool_"):
+                            await event_queue.enqueue_event(
+                                _progress_status_update(progress)
+                            )
+                            continue
+                        if progress.kind != "task_terminal":
+                            continue
+                        final_state = await self._engine.poll(
+                            task_id=state.task_id,
+                            context_id=state.context_id,
+                            wait_seconds=0,
+                        )
+                        span.set_attribute("task.status", final_state.status.value)
+                        span.set_attribute("a2a.outcome", final_state.status.value)
+                        await event_queue.enqueue_event(
+                            task_state_to_a2a_task(final_state)
+                        )
+                        return
+            finally:
+                if subscription is not None:
+                    subscription.close()
+                await event_queue.close()
 
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue

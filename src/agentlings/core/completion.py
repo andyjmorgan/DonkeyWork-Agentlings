@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import logging
 import time
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 # turn with a 413 instead of letting the model recover. Overridable per-agent via
 # ``AgentDefinition.max_tool_result_chars``; ``<= 0`` disables truncation.
 DEFAULT_MAX_TOOL_RESULT_CHARS = 32_000
+
+TOOL_ACTION_SUMMARY_FIELD = "agentling_action_summary"
+TOOL_ACTION_SUMMARY_DESCRIPTION = (
+    "A 5-15 word human-readable description of this action."
+)
 
 
 def _truncate_tool_output(output: str, limit: int) -> str:
@@ -44,6 +50,41 @@ def _truncate_tool_output(output: str, limit: int) -> str:
         f"the rest.]"
     )
     return output[:limit] + notice
+
+
+def _tool_schemas_with_action_summaries(
+    schemas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return tool schemas requiring Agentlings' progress-summary field.
+
+    The underlying tool implementations never see this field; ``run_completion``
+    strips it before registry execution. The schema wrapper is opt-in so
+    existing agents keep their current tool contract unless configured
+    otherwise.
+    """
+    wrapped = copy.deepcopy(schemas)
+    for schema in wrapped:
+        input_schema = schema.setdefault("input_schema", {})
+        input_schema.setdefault("type", "object")
+        properties = input_schema.setdefault("properties", {})
+        properties[TOOL_ACTION_SUMMARY_FIELD] = {
+            "type": "string",
+            "description": TOOL_ACTION_SUMMARY_DESCRIPTION,
+            "minLength": 12,
+            "maxLength": 120,
+        }
+        required = input_schema.setdefault("required", [])
+        if TOOL_ACTION_SUMMARY_FIELD not in required:
+            required.append(TOOL_ACTION_SUMMARY_FIELD)
+    return wrapped
+
+
+def _summary_from_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Extract a model-authored action summary with a conservative fallback."""
+    raw = tool_input.get(TOOL_ACTION_SUMMARY_FIELD)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return f"Running {tool_name}"
 
 
 class CancellationRequested(Exception):
@@ -95,6 +136,18 @@ class CompletionTurn:
 
 
 @dataclass
+class ToolExecutionEvent:
+    """Progress event emitted around an individual tool execution."""
+
+    phase: str
+    tool_name: str
+    tool_use_id: str
+    summary: str
+    turn_number: int
+    is_error: bool = False
+
+
+@dataclass
 class CompletionResult:
     """Result of running the LLM completion cycle.
 
@@ -125,10 +178,12 @@ async def run_completion(
     messages: list[dict[str, Any]],
     tools: ToolRegistry,
     turn_callback: Callable[[CompletionTurn], Awaitable[None]] | None = None,
+    tool_event_callback: Callable[[ToolExecutionEvent], Awaitable[None]] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     context_id: str | None = None,
     task_id: str | None = None,
     max_tool_result_chars: int = DEFAULT_MAX_TOOL_RESULT_CHARS,
+    tool_progress_summaries: bool = False,
 ) -> CompletionResult:
     """Run the LLM in a loop, executing tool calls until a terminal text response.
 
@@ -143,6 +198,9 @@ async def run_completion(
         turn_callback: Optional async callback invoked after each completed turn
             (with the turn that just concluded). Used by the task engine to
             journal per-turn progress into the sub-journal.
+        tool_event_callback: Optional async callback invoked before and after
+            each individual tool execution. Used by streaming protocol
+            adapters for live progress updates.
         should_cancel: Optional synchronous predicate checked at cooperative
             checkpoints — after each LLM call, before each tool batch, and
             after each tool batch. When it returns ``True``,
@@ -157,6 +215,9 @@ async def run_completion(
             result before it is truncated (with a marker) on its way back to
             the model. Guards against a runaway tool blowing the request body
             past the API's hard size limit. ``<= 0`` disables truncation.
+        tool_progress_summaries: When ``True``, require an internal
+            ``agentling_action_summary`` field on every model-facing tool
+            schema and strip it before executing the real tool.
 
     Returns:
         The final response content and all intermediate responses.
@@ -167,6 +228,8 @@ async def run_completion(
             ``CompletionResult`` containing turns completed so far.
     """
     tool_schemas = tools.list_schemas()
+    if tool_progress_summaries:
+        tool_schemas = _tool_schemas_with_action_summaries(tool_schemas)
     turns: list[CompletionTurn] = []
     cycle_start = time.monotonic()
     metrics = _get_metrics()
@@ -266,13 +329,24 @@ async def run_completion(
 
             async def _exec_tool(block: dict[str, Any]) -> dict[str, Any]:
                 tool_name = block["name"]
+                tool_input = dict(block.get("input", {}) or {})
+                summary = _summary_from_tool_input(tool_name, tool_input)
+                tool_input.pop(TOOL_ACTION_SUMMARY_FIELD, None)
                 tool_start = time.monotonic()
                 try:
+                    if tool_event_callback is not None:
+                        await tool_event_callback(ToolExecutionEvent(
+                            phase="started",
+                            tool_name=tool_name,
+                            tool_use_id=block["id"],
+                            summary=summary,
+                            turn_number=turn_number,
+                        ))
                     with otel_span("agentling.completion.tool_exec", {
                         "tool.name": tool_name,
                         "completion.turn": turn_number,
                     }) as tool_span:
-                        result = await tools.execute(tool_name, block.get("input", {}))
+                        result = await tools.execute(tool_name, tool_input)
                         duration = time.monotonic() - tool_start
                         tool_span.set_attribute("tool.is_error", result.is_error)
                         tool_span.set_attribute("tool.duration_seconds", round(duration, 4))
@@ -283,6 +357,16 @@ async def run_completion(
                     if result.is_error:
                         metrics["tool_errors"].add(1, tool_attrs)
                         logger.warning("tool %s returned error: %.200s", tool_name, result.output)
+
+                    if tool_event_callback is not None:
+                        await tool_event_callback(ToolExecutionEvent(
+                            phase="completed",
+                            tool_name=tool_name,
+                            tool_use_id=block["id"],
+                            summary=summary,
+                            turn_number=turn_number,
+                            is_error=result.is_error,
+                        ))
 
                     return {
                         "type": "tool_result",
@@ -298,6 +382,15 @@ async def run_completion(
                     metrics["tool_calls"].add(1, {"tool.name": tool_name})
                     metrics["tool_errors"].add(1, {"tool.name": tool_name})
                     record_tool_duration(tool_name, duration, True)
+                    if tool_event_callback is not None:
+                        await tool_event_callback(ToolExecutionEvent(
+                            phase="failed",
+                            tool_name=tool_name,
+                            tool_use_id=block["id"],
+                            summary=summary,
+                            turn_number=turn_number,
+                            is_error=True,
+                        ))
                     return {
                         "type": "tool_result",
                         "tool_use_id": block["id"],

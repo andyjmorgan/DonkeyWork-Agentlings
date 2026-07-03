@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentlings.config import AgentConfig
-from agentlings.protocol.agent_card import generate_agent_card
+from agentlings.protocol.agent_card import (
+    TOOL_PROGRESS_EXTENSION_URI,
+    generate_agent_card,
+)
 
 
 def test_generated_card_fields(test_config: AgentConfig) -> None:
@@ -22,6 +25,49 @@ def test_generated_card_capabilities(test_config: AgentConfig) -> None:
     card = generate_agent_card(test_config)
     assert card.capabilities.streaming is False
     assert card.capabilities.push_notifications is False
+
+
+def test_card_advertises_streaming_when_a2a_streaming_enabled(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "agent.yaml"
+    yaml_file.write_text(
+        "name: streaming-agent\n"
+        "description: Streaming agent\n"
+        "a2a:\n"
+        "  streaming: true\n"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        agent_config=str(yaml_file),
+    )
+    card = generate_agent_card(config)
+    assert card.capabilities.streaming is True
+    assert card.capabilities.push_notifications is False
+
+
+def test_card_advertises_tool_progress_extension_when_enabled(tmp_path: Path) -> None:
+    yaml_file = tmp_path / "agent.yaml"
+    yaml_file.write_text(
+        "name: progress-agent\n"
+        "description: Progress agent\n"
+        "a2a:\n"
+        "  streaming: true\n"
+        "  tool_progress_summaries: true\n"
+    )
+    config = AgentConfig(
+        anthropic_api_key="sk-test",
+        agent_api_key="key",
+        agent_data_dir=tmp_path / "data",
+        agent_config=str(yaml_file),
+    )
+    card = generate_agent_card(config)
+    assert len(card.capabilities.extensions) == 1
+    extension = card.capabilities.extensions[0]
+    assert extension.uri == TOOL_PROGRESS_EXTENSION_URI
+    assert extension.required is False
+    assert extension.params["summaryField"] == "agentling_action_summary"
+    assert extension.params["event"] == "TaskStatusUpdateEvent"
 
 
 def test_generated_card_security(test_config: AgentConfig) -> None:

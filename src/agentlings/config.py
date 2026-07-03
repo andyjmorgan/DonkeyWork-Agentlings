@@ -222,6 +222,25 @@ class IconsConfig(BaseModel):
     task: str | None = None
 
 
+class A2AConfig(BaseModel):
+    """A2A protocol surface configuration.
+
+    Attributes:
+        streaming: Advertise and enable A2A ``message/stream`` handling. The
+            streaming path observes durable Agentlings tasks; client disconnects
+            do not cancel task execution.
+        tool_progress_summaries: When enabled, Agentlings may ask the model for
+            short human-readable tool action summaries and stream them to A2A
+            clients. This is intentionally separate from ``streaming`` so the
+            backbone can exist before richer progress events.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    streaming: bool = False
+    tool_progress_summaries: bool = False
+
+
 class SkillConfig(BaseModel):
     """A skill advertised in the Agent Card.
 
@@ -286,6 +305,7 @@ class AgentDefinition(BaseModel):
     thinking: ThinkingConfig | None = None
     oauth: OAuthConfig | None = None
     icons: IconsConfig | None = None
+    a2a: A2AConfig | None = None
 
 
 class AgentConfig(BaseSettings):
@@ -324,6 +344,8 @@ class AgentConfig(BaseSettings):
     agent_oauth_issuer: str | None = None
     agent_oauth_audience: str | None = None
     agent_oauth_jwks_uri: str | None = None
+    agent_a2a_streaming: bool | None = None
+    agent_a2a_tool_progress_summaries: bool | None = None
 
     _definition: AgentDefinition = AgentDefinition()
 
@@ -407,6 +429,19 @@ class AgentConfig(BaseSettings):
             base = base.model_copy(update=updates)
         if base is None or not base.enabled:
             return None
+        return base
+
+    @property
+    def a2a_config(self) -> A2AConfig:
+        """A2A surface configuration, with env vars overriding YAML values."""
+        base = self._definition.a2a or A2AConfig()
+        updates: dict[str, Any] = {}
+        if self.agent_a2a_streaming is not None:
+            updates["streaming"] = self.agent_a2a_streaming
+        if self.agent_a2a_tool_progress_summaries is not None:
+            updates["tool_progress_summaries"] = self.agent_a2a_tool_progress_summaries
+        if updates:
+            base = base.model_copy(update=updates)
         return base
 
     @property

@@ -15,7 +15,11 @@ from uuid import uuid4
 
 import pytest
 
-from agentlings.core.completion import _truncate_tool_output, run_completion
+from agentlings.core.completion import (
+    TOOL_ACTION_SUMMARY_FIELD,
+    _truncate_tool_output,
+    run_completion,
+)
 from agentlings.core.llm import LLMResponse, MockLLMClient
 from agentlings.tools.registry import ToolRegistry, ToolResult
 
@@ -48,6 +52,19 @@ def _tool_calls_stable(*names: str) -> list[dict[str, Any]]:
     ]
 
 
+def _tool_call_with_input(name: str, input_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{
+        "type": "tool_use",
+        "id": f"t_{name}",
+        "name": name,
+        "input": input_dict,
+    }]
+
+
+async def _record_tool_event(events: list[Any], event: Any) -> None:
+    events.append(event)
+
+
 class _OneShotToolLLM(MockLLMClient):
     """LLM that returns tool calls on the first turn, then a text response.
 
@@ -59,6 +76,7 @@ class _OneShotToolLLM(MockLLMClient):
         super().__init__()
         self._tool_content = tool_content
         self._called = False
+        self.seen_tools: list[list[dict[str, Any]]] = []
 
     async def complete(
         self,
@@ -69,6 +87,7 @@ class _OneShotToolLLM(MockLLMClient):
         context_id: str | None = None,
         task_id: str | None = None,
     ) -> LLMResponse:
+        self.seen_tools.append(tools)
         if not self._called:
             self._called = True
             return LLMResponse(content=self._tool_content, stop_reason="tool_use")
@@ -134,6 +153,75 @@ class TestRunCompletion:
         await run_completion(llm, [], messages, tools, context_id="ctx-123", task_id="task-abc")
         assert len(llm.seen) >= 2
         assert all(seen == ("ctx-123", "task-abc") for seen in llm.seen)
+
+    async def test_tool_progress_summaries_wrap_schema_and_strip_execution_input(self) -> None:
+        """The model sees the progress-summary field, but real tools do not."""
+        executed_inputs: list[dict[str, Any]] = []
+        tool_events = []
+
+        async def _tool(name: str, input_dict: dict[str, Any]) -> ToolResult:
+            executed_inputs.append(input_dict)
+            return ToolResult(output="ok", is_error=False)
+
+        registry = ToolRegistry()
+        registry.register(
+            "inspect_file",
+            "Inspect a file",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+            lambda path: ToolResult(output=path),
+        )
+        registry.execute = _tool
+        llm = _OneShotToolLLM(_tool_call_with_input(
+            "inspect_file",
+            {
+                "path": "src/agentlings/core/task.py",
+                TOOL_ACTION_SUMMARY_FIELD: "Reading task engine merge logic",
+            },
+        ))
+        messages = [{"role": "user", "content": [{"type": "text", "text": "go"}]}]
+
+        await run_completion(
+            llm,
+            [],
+            messages,
+            registry,
+            tool_event_callback=lambda event: _record_tool_event(tool_events, event),
+            tool_progress_summaries=True,
+        )
+
+        schema = llm.seen_tools[0][0]["input_schema"]
+        assert TOOL_ACTION_SUMMARY_FIELD in schema["properties"]
+        assert TOOL_ACTION_SUMMARY_FIELD in schema["required"]
+        assert schema["properties"][TOOL_ACTION_SUMMARY_FIELD]["minLength"] == 12
+        assert executed_inputs == [{"path": "src/agentlings/core/task.py"}]
+        assert [(e.phase, e.summary, e.tool_name, e.tool_use_id) for e in tool_events] == [
+            ("started", "Reading task engine merge logic", "inspect_file", "t_inspect_file"),
+            ("completed", "Reading task engine merge logic", "inspect_file", "t_inspect_file"),
+        ]
+
+    async def test_tool_progress_summary_has_fallback_when_model_omits_field(self) -> None:
+        tool_events = []
+
+        async def _tool(name: str, input_dict: dict[str, Any]) -> ToolResult:
+            return ToolResult(output="ok", is_error=False)
+
+        llm = _OneShotToolLLM(_tool_call_with_input("bash", {"command": "pwd"}))
+        messages = [{"role": "user", "content": [{"type": "text", "text": "go"}]}]
+
+        await run_completion(
+            llm,
+            [],
+            messages,
+            _stub_registry(_tool),
+            tool_event_callback=lambda event: _record_tool_event(tool_events, event),
+            tool_progress_summaries=True,
+        )
+
+        assert tool_events[0].summary == "Running bash"
 
 
 # ---------------------------------------------------------------------------

@@ -19,13 +19,14 @@ import logging
 import traceback
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from agentlings.config import AgentConfig
 from agentlings.core.completion import (
     CancellationRequested,
     CompletionResult,
+    ToolExecutionEvent,
     run_completion,
 )
 from agentlings.core.llm import BaseLLMClient
@@ -340,6 +341,63 @@ class TaskState:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class TaskProgressEvent:
+    """Internal live progress notification for task observers.
+
+    These events are best-effort and intentionally lighter than the durable
+    task sub-journal. Protocol adapters use them to wake streaming clients and
+    then read authoritative state from the engine/journals.
+    """
+
+    task_id: str
+    context_id: str
+    kind: str
+    status: TaskStatus
+    text: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+class TaskProgressSubscription:
+    """A best-effort queue tap for live task progress events."""
+
+    def __init__(
+        self,
+        engine: "TaskEngine",
+        task_id: str,
+        queue: "asyncio.Queue[TaskProgressEvent]",
+    ) -> None:
+        self._engine = engine
+        self._task_id = task_id
+        self._queue = queue
+        self._closed = False
+
+    def __aiter__(self) -> "TaskProgressSubscription":
+        return self
+
+    async def __anext__(self) -> TaskProgressEvent:
+        if self._closed:
+            raise StopAsyncIteration
+        event = await self._queue.get()
+        return event
+
+    def close(self) -> None:
+        """Detach this subscription from the engine. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self._engine._unsubscribe_progress(self._task_id, self._queue)
+
+
+def _tool_phase_status(event: ToolExecutionEvent) -> str:
+    """Map internal tool callback phases to extension-friendly statuses."""
+    if event.phase == "started":
+        return "EXECUTING"
+    if event.is_error or event.phase == "failed":
+        return "FAILED"
+    return "SUCCEEDED"
+
+
 # --------------------------------------------------------------------------- #
 # Worker
 # --------------------------------------------------------------------------- #
@@ -364,6 +422,7 @@ class TaskWorker:
         task_journal: TaskJournal,
         registry: TaskRegistry,
         context_lock: asyncio.Lock,
+        progress_callback: Callable[[TaskProgressEvent], None] | None = None,
         memory_store: MemoryFileStore | None = None,
         skills: list[SkillRef] | None = None,
         otel_parent_context: Any = None,
@@ -376,6 +435,7 @@ class TaskWorker:
         self._journal = task_journal
         self._registry = registry
         self._context_lock = context_lock
+        self._progress_callback = progress_callback
         self._memory_store = memory_store
         self._skills = skills or []
         self._otel_parent_context = otel_parent_context
@@ -518,16 +578,40 @@ class TaskWorker:
                         content=block.get("content", ""),
                     ))
 
+        async def _on_tool_event(event: ToolExecutionEvent) -> None:
+            if not self._config.a2a_config.tool_progress_summaries:
+                return
+            if self._progress_callback is None:
+                return
+            self._progress_callback(TaskProgressEvent(
+                task_id=record.task_id,
+                context_id=record.context_id,
+                kind=f"tool_{event.phase}",
+                status=TaskStatus.WORKING,
+                text=event.summary,
+                data={
+                    "type": "tool_call",
+                    "tool_call_id": event.tool_use_id,
+                    "status": _tool_phase_status(event),
+                    "tool_name": event.tool_name,
+                    "description": event.summary,
+                    "turn": event.turn_number,
+                    "is_error": event.is_error,
+                },
+            ))
+
         result = await run_completion(
             llm=self._llm,
             system=system,
             messages=messages,
             tools=self._tools,
             turn_callback=_on_turn,
+            tool_event_callback=_on_tool_event,
             should_cancel=lambda: record.cancel_flag,
             context_id=record.context_id,
             task_id=record.task_id,
             max_tool_result_chars=self._config.definition.max_tool_result_chars,
+            tool_progress_summaries=self._config.a2a_config.tool_progress_summaries,
         )
         # Stash so ``run`` can stamp the cycle's token totals onto the
         # worker span before exiting.
@@ -631,6 +715,7 @@ class TaskEngine:
         self._context_locks: dict[str, asyncio.Lock] = {}
         self._context_locks_guard = asyncio.Lock()
         self._workers: dict[str, asyncio.Task[None]] = {}
+        self._progress_subscribers: dict[str, set[asyncio.Queue[TaskProgressEvent]]] = {}
         self._shutdown_started = False
 
     @property
@@ -656,6 +741,22 @@ class TaskEngine:
         Must not touch asyncio locks directly (we're in a ``done_callback``
         synchronous hook). We only drop keys that are provably safe.
         """
+        try:
+            journal = TaskJournal(self._store.task_path(context_id, task_id))
+            state = self._state_from_task(task_id, context_id, None, journal)
+            self._publish_progress(TaskProgressEvent(
+                task_id=task_id,
+                context_id=context_id,
+                kind="task_terminal",
+                status=state.status,
+                text=state.error,
+            ))
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            logger.debug(
+                "failed to publish terminal task progress",
+                extra={"task_id": task_id, "context_id": context_id},
+                exc_info=True,
+            )
         self._workers.pop(task_id, None)
         _METRICS.tasks_active.add(-1)
         if self._registry.get_by_context(context_id) is not None:
@@ -664,6 +765,46 @@ class TaskEngine:
         if lock is None or lock.locked():
             return
         self._context_locks.pop(context_id, None)
+
+    def subscribe(self, task_id: str) -> TaskProgressSubscription:
+        """Subscribe to live best-effort progress for ``task_id``.
+
+        The subscription is intentionally independent of task existence so
+        callers can subscribe before spawning and avoid missing early events.
+        Disconnecting a subscriber does not affect task execution.
+        """
+        queue: asyncio.Queue[TaskProgressEvent] = asyncio.Queue(maxsize=128)
+        self._progress_subscribers.setdefault(task_id, set()).add(queue)
+        return TaskProgressSubscription(self, task_id, queue)
+
+    def _unsubscribe_progress(
+        self,
+        task_id: str,
+        queue: "asyncio.Queue[TaskProgressEvent]",
+    ) -> None:
+        subscribers = self._progress_subscribers.get(task_id)
+        if not subscribers:
+            return
+        subscribers.discard(queue)
+        if not subscribers:
+            self._progress_subscribers.pop(task_id, None)
+
+    def _publish_progress(self, event: TaskProgressEvent) -> None:
+        subscribers = list(self._progress_subscribers.get(event.task_id, ()))
+        for queue in subscribers:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Drop the oldest queued progress event for this subscriber so
+                # a slow observer cannot block task execution.
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
     async def spawn(
         self,
@@ -732,6 +873,12 @@ class TaskEngine:
                 message=message,
                 via=via,  # type: ignore[arg-type]
             ))
+            self._publish_progress(TaskProgressEvent(
+                task_id=task_id,
+                context_id=ctx_id,
+                kind="task_started",
+                status=TaskStatus.WORKING,
+            ))
 
             ctx_lock = await self._lock_for(ctx_id)
             # Capture the calling OTel context here so the worker — which
@@ -748,6 +895,7 @@ class TaskEngine:
                 task_journal=task_journal,
                 registry=self._registry,
                 context_lock=ctx_lock,
+                progress_callback=self._publish_progress,
                 memory_store=self._memory_store,
                 skills=self._skills,
                 otel_parent_context=parent_ctx,
