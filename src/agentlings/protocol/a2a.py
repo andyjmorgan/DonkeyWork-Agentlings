@@ -33,6 +33,7 @@ from a2a.server.events import EventQueue
 from a2a.types import (
     Message,
     Role,
+    TaskArtifactUpdateEvent,
     TaskState as A2ATaskState,
     TaskStatus as A2ATaskStatus,
     TaskStatusUpdateEvent,
@@ -97,6 +98,31 @@ def _progress_status_update(progress: Any) -> TaskStatusUpdateEvent:
         ),
         metadata=metadata,
     )
+
+
+def _terminal_stream_events(
+    state: TaskState,
+) -> list[TaskArtifactUpdateEvent | TaskStatusUpdateEvent]:
+    """Render a terminal engine state as A2A streaming task update events."""
+    task = task_state_to_a2a_task(state)
+    events: list[TaskArtifactUpdateEvent | TaskStatusUpdateEvent] = []
+    for artifact in task.artifacts:
+        events.append(
+            TaskArtifactUpdateEvent(
+                task_id=task.id,
+                context_id=task.context_id,
+                artifact=artifact,
+                last_chunk=True,
+            )
+        )
+    events.append(
+        TaskStatusUpdateEvent(
+            task_id=task.id,
+            context_id=task.context_id,
+            status=task.status,
+        )
+    )
+    return events
 
 
 class AgentlingExecutor(AgentExecutor):
@@ -306,9 +332,8 @@ class AgentlingExecutor(AgentExecutor):
                         )
                         span.set_attribute("task.status", final_state.status.value)
                         span.set_attribute("a2a.outcome", final_state.status.value)
-                        await event_queue.enqueue_event(
-                            task_state_to_a2a_task(final_state)
-                        )
+                        for event in _terminal_stream_events(final_state):
+                            await event_queue.enqueue_event(event)
                         return
             finally:
                 if subscription is not None:

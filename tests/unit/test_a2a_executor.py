@@ -21,6 +21,7 @@ from a2a.types import (
     SendMessageConfiguration,
     SendMessageRequest,
     Task,
+    TaskArtifactUpdateEvent,
     TaskStatusUpdateEvent,
 )
 from a2a.types import TaskState as A2ATaskState
@@ -337,10 +338,18 @@ class TestStreamingExecution:
             stop_reason="end_turn",
         ))
 
+        artifact = await asyncio.wait_for(queue.dequeue_event(), timeout=3.0)
+        queue.task_done()
+        assert isinstance(artifact, TaskArtifactUpdateEvent)
+        assert artifact.task_id == "task-stream"
+        assert artifact.context_id == "ctx-stream"
+        assert artifact.artifact.parts[0].text == "stream done"
+        assert artifact.last_chunk is True
+
         final = await asyncio.wait_for(queue.dequeue_event(), timeout=3.0)
         queue.task_done()
-        assert isinstance(final, Task)
-        assert final.id == "task-stream"
+        assert isinstance(final, TaskStatusUpdateEvent)
+        assert final.task_id == "task-stream"
         assert final.context_id == "ctx-stream"
         assert final.status.state == A2ATaskState.TASK_STATE_COMPLETED
 
@@ -405,11 +414,14 @@ class TestStreamingExecution:
             stop_reason="end_turn",
         ))
 
-        # A completed tool progress event may arrive before the terminal Task.
+        # A completed tool progress event and artifact may arrive before terminal status.
         while True:
             event = await asyncio.wait_for(queue.dequeue_event(), timeout=3.0)
             queue.task_done()
-            if isinstance(event, Task):
+            if (
+                isinstance(event, TaskStatusUpdateEvent)
+                and event.status.state == A2ATaskState.TASK_STATE_COMPLETED
+            ):
                 final = event
                 break
 
