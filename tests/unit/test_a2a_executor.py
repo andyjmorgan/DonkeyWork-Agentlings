@@ -327,8 +327,8 @@ class TestStreamingExecution:
         assert elapsed < 1.0, (
             f"streaming did not yield the task immediately ({elapsed:.3f}s)"
         )
-        assert isinstance(first, Task)
-        assert first.id == "task-stream"
+        assert isinstance(first, TaskStatusUpdateEvent)
+        assert first.task_id == "task-stream"
         assert first.context_id == "ctx-stream"
         assert first.status.state == A2ATaskState.TASK_STATE_WORKING
         assert not execute_task.done()
@@ -393,7 +393,7 @@ class TestStreamingExecution:
 
         first = await asyncio.wait_for(queue.dequeue_event(), timeout=2.0)
         queue.task_done()
-        assert isinstance(first, Task)
+        assert isinstance(first, TaskStatusUpdateEvent)
         assert first.status.state == A2ATaskState.TASK_STATE_WORKING
 
         progress = await asyncio.wait_for(queue.dequeue_event(), timeout=2.0)

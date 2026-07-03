@@ -100,6 +100,22 @@ def _progress_status_update(progress: Any) -> TaskStatusUpdateEvent:
     )
 
 
+def _working_status_update(state: TaskState) -> TaskStatusUpdateEvent:
+    """Render a started engine task as an A2A streaming status update."""
+    return TaskStatusUpdateEvent(
+        task_id=state.task_id,
+        context_id=state.context_id,
+        status=A2ATaskStatus(
+            state=A2ATaskState.TASK_STATE_WORKING,
+            message=_agent_text_message(
+                "Task started",
+                context_id=state.context_id,
+                task_id=state.task_id,
+            ),
+        ),
+    )
+
+
 def _terminal_stream_events(
     state: TaskState,
 ) -> list[TaskArtifactUpdateEvent | TaskStatusUpdateEvent]:
@@ -310,11 +326,14 @@ class AgentlingExecutor(AgentExecutor):
                 span.set_attribute("task.status", state.status.value)
                 if subscription is None:
                     subscription = self._engine.subscribe(state.task_id)
-                await event_queue.enqueue_event(task_state_to_a2a_task(state))
 
                 if state.status in TERMINAL_STATUSES:
                     span.set_attribute("a2a.outcome", "completed")
+                    for event in _terminal_stream_events(state):
+                        await event_queue.enqueue_event(event)
                     return
+
+                await event_queue.enqueue_event(_working_status_update(state))
 
                 if subscription is not None:
                     async for progress in subscription:
