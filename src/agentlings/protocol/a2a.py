@@ -306,7 +306,6 @@ class AgentlingExecutor(AgentExecutor):
                         context_id=context_id,
                     )
                 )
-                await event_queue.close()
                 return
             except Exception:  # noqa: BLE001
                 span.set_attribute("a2a.outcome", "exception")
@@ -319,7 +318,6 @@ class AgentlingExecutor(AgentExecutor):
                         context_id=context_id,
                     )
                 )
-                await event_queue.close()
                 return
 
             try:
@@ -357,7 +355,6 @@ class AgentlingExecutor(AgentExecutor):
             finally:
                 if subscription is not None:
                     subscription.close()
-                await event_queue.close()
 
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue
