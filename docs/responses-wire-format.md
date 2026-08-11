@@ -1,6 +1,6 @@
 # OpenAI Responses wire format
 
-Status: implemented (0.14.0)
+Status: implemented (0.18.0)
 
 Agentlings speaks one internal dialect — Anthropic-shaped content blocks
 (`text`, `tool_use`, `tool_result`, `thinking`) — everywhere: the completion

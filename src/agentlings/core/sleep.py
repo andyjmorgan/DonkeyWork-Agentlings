@@ -517,6 +517,16 @@ class SleepCycle:
             succeeded, failed,
         )
 
+        if all_results and not covered:
+            # Nothing usable came back (every item failed or returned an
+            # empty payload). Writing an empty journal here would mark the
+            # night complete and suppress recovery — fail loudly instead so
+            # the cycle re-enters these conversations next run.
+            raise RuntimeError(
+                f"deep sleep produced no usable summaries for {date_str} "
+                f"({failed} of {len(all_results)} items failed)"
+            )
+
         self._write_journal(date_str, "\n\n".join(summaries), covered)
 
         if all_candidates:

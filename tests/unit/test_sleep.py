@@ -460,10 +460,10 @@ class _SpyLLM(MockLLMClient):
 
     async def complete(self, system, messages, tools, output_schema=None,
                        context_id=None, task_id=None, max_tokens=None,
-                       model=None):
+                       model=None, sleep_cycle=False):
         self.call_log.append({
             "output_schema": output_schema, "max_tokens": max_tokens,
-            "model": model,
+            "model": model, "sleep_cycle": sleep_cycle,
         })
         if self._delay:
             import asyncio
@@ -478,7 +478,7 @@ class _SpyLLM(MockLLMClient):
         return await super().complete(
             system, messages, tools, output_schema=output_schema,
             context_id=context_id, task_id=task_id, max_tokens=max_tokens,
-            model=model,
+            model=model, sleep_cycle=sleep_cycle,
         )
 
     async def batch_create(self, requests, model=None):
@@ -1287,4 +1287,25 @@ class TestCoverageSnapshots:
         assert result == ["ctx-legacy"], (
             "merge advanced the legacy entry's freshness past the "
             f"conversation's modification; got {result!r}"
+        )
+
+    async def test_all_empty_payloads_raise_no_journal(
+        self, tmp_path: Path, tmp_data_dir: Path,
+    ) -> None:
+        """If every item returns an unusable (empty) payload, the cycle
+        must raise rather than write an empty journal that marks the night
+        complete and suppresses recovery (Codex post-rebase finding 1)."""
+        llm = _SpyLLM()
+        cycle, store = _make_cycle(
+            tmp_path, tmp_data_dir, llm, "  batch: false\n",
+        )
+        ctx_ids = _seed_conversations(store, 2)
+
+        cycle._extract_structured_text = lambda content: ""  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="no usable summaries"):
+            await cycle._deep_sleep(ctx_ids, "2026-03-02")
+
+        assert not (tmp_data_dir / "journals" / "2026-03-02.md").exists(), (
+            "an all-empty cycle must not write a journal"
         )
