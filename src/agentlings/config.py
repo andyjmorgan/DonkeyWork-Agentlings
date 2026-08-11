@@ -421,25 +421,37 @@ class AgentConfig(BaseSettings):
                     f"({self.agent_model!r}) is a Messages-format model "
                     "that a Responses endpoint will not serve"
                 )
-            # Same foot-gun for the sleep-cycle model override — but an
-            # explicitly claude-* AGENT_MODEL means the gateway serves
-            # Claude models over the responses protocol, so a claude-*
-            # sleep.model is then consistent and only warned about.
+            # Same foot-gun for the sleep-cycle model override — but any
+            # gateway indication (explicitly claude-* AGENT_MODEL, the
+            # shared-key opt-in, or a non-OpenAI base URL) means the
+            # endpoint may well serve Claude models over the responses
+            # protocol, mirroring the agent_model exemption. Hard-fail
+            # only when pointing at api.openai.com itself, which
+            # certainly does not serve them.
             sleep = self._definition.sleep
             if sleep and sleep.model and sleep.model.startswith("claude-"):
-                if self.agent_model.startswith("claude-"):
+                gateway_indicated = (
+                    self.agent_model.startswith("claude-")
+                    or self.agent_shared_llm_key
+                    or bool(
+                        self.openai_base_url
+                        and not _is_openai_host(self.openai_base_url)
+                    )
+                )
+                if gateway_indicated:
                     logger.warning(
                         "sleep.model (%s) is a Claude model on the "
-                        "responses wire format — assuming the gateway "
-                        "serves it, matching AGENT_MODEL (%s)",
-                        sleep.model, self.agent_model,
+                        "responses wire format — assuming the configured "
+                        "gateway serves it",
+                        sleep.model,
                     )
                 else:
                     raise ValueError(
                         f"sleep.model ({sleep.model!r}) is a "
-                        "Messages-format model, which a Responses "
-                        "endpoint will not serve — set a Responses-served "
-                        "model or remove the override"
+                        "Messages-format model, which api.openai.com "
+                        "will not serve — set a Responses-served model, "
+                        "remove the override, or point OPENAI_BASE_URL "
+                        "at a gateway that serves it"
                     )
         return self
 

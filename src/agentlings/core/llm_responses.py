@@ -567,10 +567,12 @@ def output_to_blocks(
             # the reasoning while keeping its paired call would let the
             # tool execute and then journal a call whose replay is
             # rejected forever — the pair must stay together. Reinsert
-            # the reasoning before the last tool call (the canonical
-            # [reasoning, function_call] order), preserving its own
-            # relative order.
-            idx = tool_use_indices[-1]
+            # the reasoning before the FIRST tool call (the canonical
+            # [reasoning, function_call, ...] order): with parallel
+            # function calls, inserting any later would journal the
+            # earlier calls without a preceding reasoning item and 400
+            # every replay after their side effects.
+            idx = tool_use_indices[0]
             blocks[idx:idx] = list(reversed(trailing))
             logger.warning(
                 "reordered %d trailing reasoning item(s) before their "

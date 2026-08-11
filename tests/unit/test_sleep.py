@@ -314,6 +314,54 @@ class TestMissedNightRecovery:
             f"summarised={summarized} got={result}"
         )
 
+    def test_pre_upgrade_journals_resume_from_latest_date(
+        self, sleep_deps, tmp_data_dir: Path,
+    ) -> None:
+        """Migration gate: journals without any coverage marker
+        (pre-upgrade data dir) must NOT trigger the retention-wide sweep
+        — everything they covered would be re-summarized (duplicate
+        spend). Review resumes from the latest journal's own date."""
+        cycle, store, _, _ = sleep_deps
+        now = datetime.now(timezone.utc)
+        # Covered era: 6 days old — inside retention (7d) but before the
+        # latest pre-upgrade journal.
+        self._seed_named(store, tmp_data_dir, "ctx-ancient", now - timedelta(days=6))
+        # After the latest journal's date: must be picked up.
+        self._seed_named(store, tmp_data_dir, "ctx-recent", now - timedelta(days=3))
+
+        journals = tmp_data_dir / "journals"
+        journals.mkdir(exist_ok=True)
+        for days_ago in (4, 5):
+            day = (now - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+            # Pre-upgrade journals: no coverage marker on line 1.
+            (journals / f"{day}.md").write_text(f"# Journal — {day}\n\n### ctx-ancient\nOld summary.\n")
+
+        result = cycle._light_sleep(now)
+        assert result == ["ctx-recent"], (
+            "pre-upgrade fallback must resume from the latest journal "
+            "date, not sweep the whole retention window"
+        )
+
+    def test_marker_journal_enables_retention_wide_window(
+        self, sleep_deps, tmp_data_dir: Path,
+    ) -> None:
+        """Once any marker-bearing journal exists, the retention-wide
+        window applies — an old uncovered conversation is recovered even
+        though it predates the latest journal."""
+        cycle, store, _, _ = sleep_deps
+        now = datetime.now(timezone.utc)
+        self._seed_named(store, tmp_data_dir, "ctx-old-uncovered", now - timedelta(days=6))
+
+        journals = tmp_data_dir / "journals"
+        journals.mkdir(exist_ok=True)
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        (journals / f"{yesterday}.md").write_text(
+            "<!-- agentling-coverage: some-other-ctx -->\n# journal\n"
+        )
+
+        result = cycle._light_sleep(now)
+        assert result == ["ctx-old-uncovered"]
+
     def test_window_bounded_by_retention(self, sleep_deps, tmp_data_dir: Path) -> None:
         """The widened window never reaches past conversation retention —
         housekeeping deletes those conversations anyway."""
@@ -446,6 +494,7 @@ class _SpyLLM(MockLLMClient):
         fail_from: int | None = None,
         fail_exc: Exception | None = None,
         fail_all: bool = False,
+        fail_when_contains: set[str] | None = None,
         delay: float = 0.0,
     ) -> None:
         super().__init__(tool_names=[])
@@ -454,6 +503,7 @@ class _SpyLLM(MockLLMClient):
         self._fail_from = fail_from
         self._fail_exc = fail_exc
         self._fail_all = fail_all
+        self._fail_when_contains = fail_when_contains or set()
         self._delay = delay
         self.call_log: list[dict] = []
         self.batch_create_calls = 0
@@ -469,10 +519,12 @@ class _SpyLLM(MockLLMClient):
             import asyncio
             await asyncio.sleep(self._delay)
         n = len(self.call_log)
+        message_text = str(messages)
         if (
             self._fail_all
             or self._fail_on_call == n
             or (self._fail_from is not None and n >= self._fail_from)
+            or any(needle in message_text for needle in self._fail_when_contains)
         ):
             raise (self._fail_exc or RuntimeError("simulated live-summary failure"))
         return await super().complete(
@@ -865,12 +917,12 @@ class TestLiveSummaryPath:
         assert len(summaries) == 2
         assert (tmp_data_dir / "journals" / "2026-01-18.md").exists()
 
-    async def test_two_leading_bad_requests_declare_systemic(
+    async def test_systemic_bad_requests_confirmed_by_far_probe(
         self, tmp_path: Path, tmp_data_dir: Path,
     ) -> None:
-        """A leading 400 is ambiguous; a second consecutive one (with
-        nothing succeeded) resolves the ambiguity as systemic — abort
-        instead of burning a 400 per conversation."""
+        """Two leading 400s trigger a probe of the FARTHEST pending
+        conversation; only a third distinct rejection declares systemic —
+        bounded at three calls, never one 400 per conversation."""
         from agentlings.core.llm_responses import ResponsesAPIError
 
         llm = _SpyLLM(
@@ -885,8 +937,38 @@ class TestLiveSummaryPath:
 
         with pytest.raises(ResponsesAPIError):
             await cycle._deep_sleep(ctx_ids, "2026-01-19")
-        assert len(llm.call_log) == 2, "probe exactly one other conversation"
+        assert len(llm.call_log) == 3, "two leading failures + one far probe"
         assert not (tmp_data_dir / "journals" / "2026-01-19.md").exists()
+
+    async def test_two_poison_first_conversations_cannot_wedge(
+        self, tmp_path: Path, tmp_data_dir: Path,
+    ) -> None:
+        """Wedge-proof invariant: two specific poison conversations,
+        re-entered FIRST every night (sorted order), must not block the
+        cycle — the far probe succeeds, the rest summarise, and the
+        journal is written so the night makes progress."""
+        from agentlings.core.llm_responses import ResponsesAPIError
+
+        llm = _SpyLLM(
+            fail_when_contains={"ctx-0", "ctx-1"},
+            fail_exc=ResponsesAPIError(
+                "context too large", status_code=400,
+                error_type="invalid_request_error",
+            ),
+        )
+        cycle, store = _make_cycle(tmp_path, tmp_data_dir, llm, "  batch: false\n")
+        ctx_ids = _seed_conversations(store, 4)  # ctx-0..ctx-3, poison first two
+
+        summaries, _ = await cycle._deep_sleep(ctx_ids, "2026-01-20")
+
+        # ctx-0 fails, ctx-1 fails, far probe ctx-3 succeeds, ctx-2 succeeds.
+        assert len(llm.call_log) == 4
+        assert len(summaries) == 2
+        journal = tmp_data_dir / "journals" / "2026-01-20.md"
+        assert journal.exists(), "night 2 progress requires night 1's journal"
+        first_line = journal.read_text().splitlines()[0]
+        assert "ctx-2" in first_line and "ctx-3" in first_line
+        assert "ctx-0" not in first_line and "ctx-1" not in first_line
 
     async def test_deadline_expiry_keeps_completed_work(
         self, tmp_path: Path, tmp_data_dir: Path,
@@ -955,6 +1037,33 @@ class TestJournalMerge:
 
         index = cycle._summarized_context_index()
         assert set(index) == {"ctx-a", "ctx-b"}
+
+    def test_hostile_context_ids_round_trip(
+        self, tmp_path: Path, tmp_data_dir: Path,
+    ) -> None:
+        """Context ids are client-supplied and may contain whitespace,
+        newlines, colons, or percent signs — the single-line marker must
+        round-trip them all without corruption."""
+        cycle = self._cycle(tmp_path, tmp_data_dir)
+        hostile = [
+            "ctx with spaces",
+            "ctx\nwith\nnewlines",
+            "ctx:with:colons",
+            "ctx%25already-encoded",
+            "плохой-ctx",
+        ]
+        covered = {ctx: 1700000000.0 + i for i, ctx in enumerate(hostile)}
+        cycle._write_journal("2026-02-03", "### body\ntext", covered)
+
+        journal = tmp_data_dir / "journals" / "2026-02-03.md"
+        content = journal.read_text()
+        assert content.startswith("<!-- agentling-coverage: "), content[:60]
+        assert "\n" not in content.splitlines()[0]  # marker stays one line
+
+        index = cycle._summarized_context_index()
+        assert set(index) == set(hostile), (
+            f"ids must round-trip exactly; got {set(index)!r}"
+        )
 
     def test_fresh_journal_has_marker_first_line(
         self, tmp_path: Path, tmp_data_dir: Path,

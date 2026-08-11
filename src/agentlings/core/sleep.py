@@ -8,6 +8,8 @@ import logging
 import os
 import re
 import time
+from collections import deque
+from urllib.parse import quote, unquote
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -58,12 +60,15 @@ def _parse_coverage_marker(line: str) -> dict[str, float | None] | None:
         ctx, sep, ts = token.rpartition(":")
         if sep and ctx:
             try:
-                covered[ctx] = float(ts)
+                # Context ids are client-supplied and percent-encoded at
+                # write time (they may contain whitespace, newlines, or
+                # colons that would corrupt the space-joined marker).
+                covered[unquote(ctx)] = float(ts)
                 continue
             except ValueError:
                 pass
         if token:
-            covered[token] = None
+            covered[unquote(token)] = None
     return covered
 
 # Aggregate wall-clock budget for the live-summary path — mirrors the batch
@@ -341,6 +346,15 @@ class SleepCycle:
         failed day must be retried before retention deletes it. On a
         genuinely fresh install the sweep is bounded by retention and the
         coverage index keeps it duplicate-free.
+
+        **Pre-upgrade migration:** journals written before the coverage
+        marker existed carry no per-context record, so a retention-wide
+        window would re-summarize every conversation those journals
+        already covered (duplicate spend and duplicate REM input). When
+        journals exist but NONE carries a marker, review resumes from the
+        latest journal's own date instead — the pre-marker boundary rule.
+        Once any marker-bearing journal exists, the retention-wide window
+        applies.
         """
         journals_dir = self._config.agent_data_dir / "journals"
         wide_cutoff = default_cutoff - timedelta(
@@ -349,6 +363,7 @@ class SleepCycle:
         if not journals_dir.exists():
             return wide_cutoff
         journal_dates: list[datetime] = []
+        any_marker = False
         for path in journals_dir.glob("*.md"):
             try:
                 journal_dates.append(
@@ -358,9 +373,28 @@ class SleepCycle:
                 )
             except ValueError:
                 continue
+            if not any_marker:
+                try:
+                    with path.open(encoding="utf-8") as fh:
+                        first_line = fh.readline()
+                except OSError:
+                    continue
+                if _parse_coverage_marker(first_line) is not None:
+                    any_marker = True
         if not journal_dates:
             return wide_cutoff
         latest = max(journal_dates)
+        if not any_marker:
+            # Pre-upgrade data dir: coverage unknown, so trust the old
+            # boundary — resume from the day the latest journal covered.
+            resume = min(max(latest, wide_cutoff), default_cutoff)
+            logger.info(
+                "[SLEEP:LIGHT] Journals predate coverage markers; "
+                "resuming review from %s (retention-wide recovery begins "
+                "once a marker-bearing journal exists)",
+                resume.strftime("%Y-%m-%d"),
+            )
+            return resume
         if latest < default_cutoff - timedelta(days=1):
             # More than the routine one-day overlap: cycles were missed.
             logger.warning(
@@ -717,14 +751,22 @@ class SleepCycle:
         succeeded = 0
         abort_reason: str | None = None
         leading_bad_requests = 0
+        probe_far_next = False
         start = time.monotonic()
+        queue = deque(requests)
 
         def _record_failure(req: BatchRequest, error: str) -> None:
             results.append(BatchItemResult(
                 custom_id=req.custom_id, status="failed", error=error,
             ))
 
-        for req in requests:
+        while queue:
+            # A far probe pulls the LAST pending conversation forward: two
+            # leading request rejections must never condemn the whole night
+            # on their own evidence (two specific poison conversations,
+            # re-entered first every cycle, would wedge the agent forever).
+            req = queue.pop() if probe_far_next else queue.popleft()
+            probe_far_next = False
             if abort_reason is not None:
                 _record_failure(req, f"skipped: {abort_reason}")
                 continue
@@ -809,19 +851,31 @@ class SleepCycle:
                         _record_failure(req, str(e))
                         break
                     if succeeded == 0 and _is_bad_request(e):
-                        # A leading 400 is ambiguous — poison conversation
-                        # or systemic misconfiguration. Probe at least one
-                        # other conversation before declaring systemic.
+                        # Leading 400s are ambiguous — poison conversations
+                        # or systemic misconfiguration. Two in a row
+                        # trigger a probe of the FARTHEST pending
+                        # conversation; only when that third, distinct
+                        # conversation is also rejected is the night
+                        # declared systemic. No two specific conversations
+                        # can therefore permanently block the cycle.
                         leading_bad_requests += 1
-                        if leading_bad_requests >= 2:
+                        if leading_bad_requests >= 3:
                             logger.error(
-                                "[SLEEP:DEEP] The first %d conversations "
-                                "all failed with request rejections; "
-                                "treating as systemic and aborting "
-                                "(recovered automatically next cycle): %s",
+                                "[SLEEP:DEEP] %d distinct conversations "
+                                "(including a far probe) all failed with "
+                                "request rejections; treating as systemic "
+                                "and aborting (recovered automatically "
+                                "next cycle): %s",
                                 leading_bad_requests, e,
                             )
                             raise
+                        if leading_bad_requests == 2 and queue:
+                            logger.warning(
+                                "[SLEEP:DEEP] Two leading request "
+                                "rejections; probing a later conversation "
+                                "before declaring systemic",
+                            )
+                            probe_far_next = True
                     logger.warning(
                         "[SLEEP:DEEP] Live summary failed for %s: %s",
                         req.custom_id, e,
@@ -927,8 +981,12 @@ class SleepCycle:
                 "[SLEEP:DEEP] Merging into existing journal for %s "
                 "(%d newly covered conversations)", date_str, len(covered),
             )
+        # Context ids are client-supplied (A2A/MCP contextId) and may
+        # contain whitespace, newlines, or colons — percent-encode each id
+        # so the single-line space-joined marker survives any id.
         entries = " ".join(
-            f"{ctx}:{stamp:.6f}" if stamp is not None else ctx
+            f"{quote(ctx, safe='')}:{stamp:.6f}"
+            if stamp is not None else quote(ctx, safe="")
             for ctx, stamp in sorted(coverage.items())
         )
         marker = _COVERAGE_MARKER_TEMPLATE.format(ids=entries)

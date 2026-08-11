@@ -461,6 +461,47 @@ class TestWireFormatConfig:
         )
         assert mock_config.llm_base_url is None
 
+    def test_claude_sleep_model_warns_when_gateway_base_url(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A non-OpenAI base URL indicates a gateway that may serve
+        Claude models over responses — warn, don't fail (mirroring the
+        agent_model exemption)."""
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        with caplog.at_level("WARNING"):
+            config = AgentConfig(
+                openai_api_key="sk-openai",
+                openai_base_url="https://gateway.example",
+                agent_wire_format="responses",
+                agent_config=str(agent_yaml),
+                **self._base_kwargs(tmp_path),
+            )
+        assert config.sleep_config.model == "claude-haiku-4-5"
+        assert any("sleep.model" in r.message for r in caplog.records)
+
+    def test_claude_sleep_model_still_fails_against_openai_itself(
+        self, tmp_path: Path,
+    ) -> None:
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        with pytest.raises(Exception, match="sleep.model"):
+            AgentConfig(
+                openai_api_key="sk-openai",
+                openai_base_url="https://api.openai.com/v1",
+                agent_wire_format="responses",
+                agent_config=str(agent_yaml),
+                **self._base_kwargs(tmp_path),
+            )
+
     def test_claude_sleep_model_warns_when_agent_model_also_claude(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:

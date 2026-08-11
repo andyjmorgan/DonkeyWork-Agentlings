@@ -579,6 +579,23 @@ class TestOutputToBlocks:
         assert blocks[0]["item_id"] == "rs_1"
         assert any("reordered" in r.message for r in caplog.records)
 
+    def test_parallel_calls_reorder_before_first_call(self) -> None:
+        """With PARALLEL function calls, trailing reasoning must land
+        before the FIRST call — otherwise the earlier calls journal
+        without a preceding reasoning item and every replay 400s after
+        their side effects."""
+        blocks, _, _ = output_to_blocks([
+            {"type": "function_call", "call_id": "call_a", "name": "f",
+             "arguments": "{}"},
+            {"type": "function_call", "call_id": "call_b", "name": "g",
+             "arguments": "{}"},
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "e",
+             "summary": []},
+        ])
+        assert [b["type"] for b in blocks] == ["thinking", "tool_use", "tool_use"]
+        assert blocks[1]["id"] == "call_a"
+        assert blocks[2]["id"] == "call_b"
+
     def test_multiple_trailing_reasoning_keep_order_when_reordered(self) -> None:
         blocks, _, _ = output_to_blocks([
             {"type": "function_call", "call_id": "call_1", "name": "echo",
