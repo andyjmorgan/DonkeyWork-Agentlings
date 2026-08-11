@@ -29,7 +29,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "pydantic>=2.11",
     "pydantic-settings>=2.9",
-    "mcp>=1.10.0",
+    "mcp>=1.10.0,<2",
     "python-dotenv>=1.1",
     "pyyaml>=6.0",
     "pyjwt[crypto]>=2.10",
@@ -63,6 +63,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "ollama: integration tests that require a live Ollama server reachable at OLLAMA_HOST",
+    "responses: live integration tests for the OpenAI Responses wire format; require RESPONSES_API_KEY (+ optionally RESPONSES_BASE_URL) for an OpenAI-compatible /v1/responses endpoint",
 ]
 # Silence noisy transitive-dependency deprecations. These are issues in
 # FastAPI/uvicorn/websockets/MCP SDK internals, not our code, and appear on

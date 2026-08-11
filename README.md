@@ -319,8 +319,12 @@ Secrets and runtime settings stay in env vars or, more commonly, the `.env` file
 | `AGENT_CONFIG` | `./agent.yaml` (when present) | Path to agent YAML definition |
 | `ANTHROPIC_API_KEY` | — | Anthropic API key (required for api.anthropic.com; optional with `ANTHROPIC_BASE_URL` pointed at e.g. Ollama) |
 | `ANTHROPIC_BASE_URL` | — | Override the Messages endpoint. Use `http://localhost:11434` to target Ollama's Anthropic-compatible API |
+| `AGENT_WIRE_FORMAT` | `messages` | LLM wire format: `messages` (Anthropic Messages API) or `responses` (OpenAI Responses API). See `docs/responses-wire-format.md` |
+| `OPENAI_API_KEY` | — | Bearer key for the Responses endpoint (`AGENT_WIRE_FORMAT=responses`) |
+| `AGENT_SHARED_LLM_KEY` | `false` | Explicit opt-in to reuse `ANTHROPIC_API_KEY` as the Responses Bearer key against a non-OpenAI gateway (`OPENAI_BASE_URL` required; openai.com hosts always refused) |
+| `OPENAI_BASE_URL` | — | Override the Responses endpoint (default api.openai.com). Point at an OpenAI-compatible gateway or Ollama's `/v1/responses` |
 | `AGENT_API_KEY` | — | API key for authenticating clients |
-| `AGENT_MODEL` | `claude-sonnet-4-6` | Model ID — set to an Ollama model (e.g. `qwen3-coder`) when using `ANTHROPIC_BASE_URL` |
+| `AGENT_MODEL` | `claude-sonnet-4-6` | Model ID — set to an Ollama model (e.g. `qwen3-coder`) when using `ANTHROPIC_BASE_URL`. Required explicitly (e.g. `gpt-5-mini`) with `AGENT_WIRE_FORMAT=responses` — the Claude default is refused there |
 | `AGENT_MAX_TOKENS` | `4096` | Max tokens per LLM response |
 | `AGENT_HOST` | `0.0.0.0` | Bind address |
 | `AGENT_PORT` | `8420` | Bind port |

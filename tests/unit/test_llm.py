@@ -332,6 +332,200 @@ class TestFactory:
         assert client._client.api_key == "unset"
 
 
+class TestForeignBlockKeyStripping:
+    """Journals written under AGENT_WIRE_FORMAT=responses stamp ``item_id``
+    (reasoning/function-call identity) onto tool_use/thinking blocks. The
+    Anthropic Messages API rejects unknown block fields, so switching back
+    to the messages wire format must sanitise them at the request boundary
+    — without touching clean journals. Foreign thinking blocks are dropped
+    outright: their ``signature`` is OpenAI ``encrypted_content``, not an
+    Anthropic thinking signature, and would invalidate the history.
+    """
+
+    def _stub_client(self) -> tuple[AnthropicLLMClient, AsyncMock]:
+        response = MagicMock()
+        response.content = []
+        response.stop_reason = "end_turn"
+        response.usage = None
+        create = AsyncMock(return_value=response)
+        mock_client = MagicMock()
+        mock_client.messages.create = create
+        client = AnthropicLLMClient.__new__(AnthropicLLMClient)
+        client._client = mock_client
+        client._model = "claude-sonnet-4-6"
+        client._max_tokens = 128
+        return client, create
+
+    @pytest.mark.asyncio
+    async def test_foreign_thinking_dropped_and_item_id_stripped(self) -> None:
+        client, create = self._stub_client()
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "enc",
+                 "item_id": "rs_1"},
+                {"type": "tool_use", "id": "call_1", "name": "echo",
+                 "input": {"text": "hi"}, "item_id": "fc_1"},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "ok"},
+            ]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        sent = create.await_args.kwargs["messages"]
+        # The foreign thinking block is gone entirely; tool_use keeps its
+        # Anthropic fields only.
+        assert sent[0]["content"] == [
+            {"type": "tool_use", "id": "call_1", "name": "echo",
+             "input": {"text": "hi"}},
+        ]
+        # The caller's journal structures are never mutated.
+        assert messages[0]["content"][0]["item_id"] == "rs_1"
+        assert messages[0]["content"][1]["item_id"] == "fc_1"
+
+    @pytest.mark.asyncio
+    async def test_foreign_thinking_with_empty_item_id_also_dropped(self) -> None:
+        """Backends without item ids stamp item_id='' — the marker's
+        presence (not truthiness) identifies foreign reasoning."""
+        client, create = self._stub_client()
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "anon", "signature": "",
+                 "item_id": ""},
+                {"type": "text", "text": "hello"},
+            ]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        sent = create.await_args.kwargs["messages"]
+        assert sent[0]["content"] == [{"type": "text", "text": "hello"}]
+
+    @pytest.mark.asyncio
+    async def test_native_thinking_blocks_untouched(self) -> None:
+        """Genuine Anthropic thinking blocks (no item_id) pass through."""
+        client, create = self._stub_client()
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "real-sig"},
+                {"type": "text", "text": "answer"},
+            ]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        sent = create.await_args.kwargs["messages"]
+        assert sent[0] is messages[0]
+
+    @pytest.mark.asyncio
+    async def test_mixed_history_strips_native_thinking_too(self) -> None:
+        """When foreign markers force thinking suppression, NATIVE
+        thinking blocks elsewhere in the history must also be stripped —
+        Anthropic rejects thinking blocks in a request whose thinking
+        parameter is disabled, which would wedge the context."""
+        client, create = self._stub_client()
+        client._thinking = ThinkingConfig(mode="adaptive")
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "native", "signature": "real-sig"},
+                {"type": "text", "text": "earlier native turn"},
+            ]},
+            {"role": "user", "content": "next"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "echo",
+                 "input": {}, "item_id": "fc_1"},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "ok"},
+            ]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        kwargs = create.await_args.kwargs
+        assert "thinking" not in kwargs
+        assert kwargs["messages"][0]["content"] == [
+            {"type": "text", "text": "earlier native turn"},
+        ], "native thinking must be elided alongside suppression"
+        assert kwargs["messages"][2]["content"] == [
+            {"type": "tool_use", "id": "call_1", "name": "echo", "input": {}},
+        ]
+        # Caller's journal structures never mutated.
+        assert messages[0]["content"][0]["type"] == "thinking"
+
+    @pytest.mark.asyncio
+    async def test_model_override_per_call(self) -> None:
+        """The sleep cycle's sleep.model override rides this parameter."""
+        client, create = self._stub_client()
+        await client.complete(
+            system=[], messages=[], tools=[], model="claude-haiku-4-5",
+        )
+        assert create.await_args.kwargs["model"] == "claude-haiku-4-5"
+
+    @pytest.mark.asyncio
+    async def test_foreign_history_disables_thinking(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """With extended thinking enabled, Anthropic requires assistant
+        tool_use messages to start with a native thinking block — which a
+        history imported from the responses wire format cannot provide.
+        The thinking parameter must be suppressed for such requests so
+        crash-recovery replay completes instead of 400ing forever."""
+        client, create = self._stub_client()
+        client._thinking = ThinkingConfig(mode="adaptive", effort="medium")
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "enc",
+                 "item_id": "rs_1"},
+                {"type": "tool_use", "id": "call_1", "name": "echo",
+                 "input": {}, "item_id": "fc_1"},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "ok"},
+            ]},
+        ]
+        with caplog.at_level("WARNING"):
+            await client.complete(system=[], messages=messages, tools=[])
+        assert "thinking" not in create.await_args.kwargs
+        assert any(
+            "disabling extended thinking" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_clean_history_keeps_thinking(self) -> None:
+        client, create = self._stub_client()
+        client._thinking = ThinkingConfig(mode="adaptive", effort="medium")
+        await client.complete(
+            system=[],
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+        )
+        assert create.await_args.kwargs["thinking"] == {"type": "adaptive"}
+
+    @pytest.mark.asyncio
+    async def test_all_foreign_content_leaves_placeholder(self) -> None:
+        """A message that was pure foreign reasoning must not become an
+        empty (invalid) content array."""
+        client, create = self._stub_client()
+        messages = [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t", "signature": "enc",
+                 "item_id": "rs_1"},
+            ]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        sent = create.await_args.kwargs["messages"]
+        assert sent[0]["content"] == [
+            {"type": "text", "text": "[reasoning from another provider elided]"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_clean_messages_pass_through_unchanged(self) -> None:
+        client, create = self._stub_client()
+        messages = [
+            {"role": "user", "content": "plain string"},
+            {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        ]
+        await client.complete(system=[], messages=messages, tools=[])
+        sent = create.await_args.kwargs["messages"]
+        # Clean journals are the same objects — no copies, no rewrites.
+        assert sent[0] is messages[0]
+        assert sent[1] is messages[1]
+
+
 class TestThinkingHelper:
     """``_build_thinking_kwargs`` translates ThinkingConfig → API kwargs.
 

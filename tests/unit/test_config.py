@@ -205,6 +205,368 @@ def test_llm_backend_validation(tmp_path: Path) -> None:
         )
 
 
+class TestWireFormatConfig:
+    """The AGENT_WIRE_FORMAT selector and the OPENAI_* endpoint settings."""
+
+    def _base_kwargs(self, tmp_path: Path) -> dict:
+        return {
+            "agent_api_key": "key",
+            "agent_data_dir": tmp_path / "data",
+            # The responses wire format requires an explicit model.
+            "agent_model": "gpt-5-mini",
+            "_env_file": None,
+        }
+
+    def test_default_wire_format_is_messages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AGENT_WIRE_FORMAT", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-test", **self._base_kwargs(tmp_path),
+        )
+        assert config.agent_wire_format == "messages"
+
+    def test_wire_format_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AGENT_WIRE_FORMAT", "responses")
+        config = AgentConfig(
+            anthropic_api_key="sk-test", **self._base_kwargs(tmp_path),
+        )
+        assert config.agent_wire_format == "responses"
+
+    def test_invalid_wire_format_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(Exception):
+            AgentConfig(
+                anthropic_api_key="sk-test",
+                agent_wire_format="grpc",  # type: ignore[arg-type]
+                **self._base_kwargs(tmp_path),
+            )
+
+    def test_openai_settings_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example")
+        config = AgentConfig(
+            anthropic_api_key="sk-test", **self._base_kwargs(tmp_path),
+        )
+        assert config.openai_api_key == "sk-openai"
+        assert config.openai_base_url == "https://gateway.example"
+
+    def test_llm_api_key_messages_uses_anthropic(self, tmp_path: Path) -> None:
+        config = AgentConfig(
+            anthropic_api_key="sk-anthropic",
+            openai_api_key="sk-openai",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_api_key == "sk-anthropic"
+
+    def test_llm_api_key_responses_prefers_openai(self, tmp_path: Path) -> None:
+        config = AgentConfig(
+            anthropic_api_key="sk-anthropic",
+            openai_api_key="sk-openai",
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_api_key == "sk-openai"
+
+    def test_llm_api_key_fallback_requires_explicit_opt_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One inbound key can serve both protocols — but ONLY with the
+        explicit AGENT_SHARED_LLM_KEY opt-in plus a gateway URL.
+        Credential routing is never inferred from DNS alone."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-shared",
+            openai_base_url="https://gateway.example",
+            agent_shared_llm_key=True,
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_api_key == "sk-shared"
+
+    def test_llm_api_key_no_fallback_without_opt_in(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A gateway URL alone (Azure OpenAI, a typo'd host, ...) must
+        NOT route the Anthropic key anywhere."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-shared",
+            openai_base_url="https://myco.openai.azure.com",
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        with pytest.raises(ValueError, match="AGENT_SHARED_LLM_KEY"):
+            _ = config.llm_api_key
+
+    def test_llm_api_key_responses_refuses_anthropic_key_for_openai(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without a base-URL override the fallback would send the
+        Anthropic secret as a Bearer token to api.openai.com — the config
+        must fail fast instead of leaking it."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-ant-secret",
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+            _ = config.llm_api_key
+
+    def test_llm_base_url_per_wire_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            anthropic_base_url="http://ollama:11434",
+            openai_base_url="https://gateway.example",
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_base_url == "https://gateway.example"
+
+    def test_llm_base_url_responses_does_not_fall_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ANTHROPIC_BASE_URL points at a Messages-shaped endpoint — it must
+        never leak into the responses wire format."""
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            anthropic_base_url="http://ollama:11434",
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_base_url is None
+
+    def test_llm_base_url_messages_uses_anthropic(self, tmp_path: Path) -> None:
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            anthropic_base_url="http://ollama:11434",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.llm_base_url == "http://ollama:11434"
+
+    @pytest.mark.parametrize("openai_url", [
+        "https://api.openai.com",
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/responses",
+        "https://openai.com",
+        "https://eu.api.openai.com/v1",
+        # FQDN trailing dot — same host to DNS, must classify identically.
+        "http://api.openai.com./v1",
+        "https://API.OPENAI.COM.",
+    ])
+    def test_fallback_refused_for_openai_hosts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, openai_url: str,
+    ) -> None:
+        """Even WITH the shared-key opt-in, any openai.com host form
+        still refuses the Anthropic key."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-ant-secret",
+            openai_base_url=openai_url,
+            agent_shared_llm_key=True,
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+            _ = config.llm_api_key
+
+    def test_responses_requires_explicit_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The built-in Claude model default would be sent to a Responses
+        endpoint that cannot serve it — selecting the responses wire
+        format without an explicit AGENT_MODEL must fail fast."""
+        monkeypatch.delenv("AGENT_MODEL", raising=False)
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs.pop("agent_model")
+        with pytest.raises(Exception, match="AGENT_MODEL"):
+            AgentConfig(
+                openai_api_key="sk-openai",
+                agent_wire_format="responses",
+                **kwargs,
+            )
+
+    def test_responses_model_from_env_counts_as_explicit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AGENT_MODEL", "gpt-5-mini")
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs.pop("agent_model")
+        config = AgentConfig(
+            openai_api_key="sk-openai",
+            agent_wire_format="responses",
+            **kwargs,
+        )
+        assert config.agent_model == "gpt-5-mini"
+
+    def test_schemeless_base_url_rejected_at_config_time(
+        self, tmp_path: Path,
+    ) -> None:
+        """A scheme-less URL parses as a path (no hostname) — it would
+        both break the HTTP client and bypass the openai.com fallback
+        guard, so it is rejected outright."""
+        with pytest.raises(Exception, match="OPENAI_BASE_URL"):
+            AgentConfig(
+                openai_api_key="sk-openai",
+                openai_base_url="api.openai.com",
+                agent_wire_format="responses",
+                **self._base_kwargs(tmp_path),
+            )
+
+    def test_gateway_fallback_logs_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The opted-in ANTHROPIC_API_KEY fallback must be visible."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        config = AgentConfig(
+            anthropic_api_key="sk-shared",
+            openai_base_url="https://gateway.example",
+            agent_shared_llm_key=True,
+            agent_wire_format="responses",
+            **self._base_kwargs(tmp_path),
+        )
+        with caplog.at_level("WARNING"):
+            assert config.llm_api_key == "sk-shared"
+        assert any(
+            "gateway.example" in r.message and "ANTHROPIC_API_KEY" in r.message
+            for r in caplog.records
+        )
+
+    def test_schemeless_url_ignored_on_messages_deployment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An OPENAI_BASE_URL exported for unrelated tooling must not
+        abort a messages/mock deployment that never reads it."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "api.openai.com")
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.agent_wire_format == "messages"
+        mock_config = AgentConfig(
+            agent_llm_backend="mock",
+            agent_wire_format="responses",
+            **{**self._base_kwargs(tmp_path), "agent_model": "gpt-5-mini"},
+        )
+        assert mock_config.llm_base_url is None
+
+    def test_claude_sleep_model_warns_when_agent_model_also_claude(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An explicitly claude-* AGENT_MODEL means the gateway serves
+        Claude over responses — a claude-* sleep.model is then consistent
+        and warned about, not rejected (same exemption as AGENT_MODEL)."""
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs["agent_model"] = "claude-sonnet-4-6"
+        with caplog.at_level("WARNING"):
+            config = AgentConfig(
+                openai_api_key="sk-openai",
+                agent_wire_format="responses",
+                agent_config=str(agent_yaml),
+                **kwargs,
+            )
+        assert config.sleep_config.model == "claude-haiku-4-5"
+        assert any("sleep.model" in r.message for r in caplog.records)
+
+    def test_claude_sleep_model_rejected_under_responses(
+        self, tmp_path: Path,
+    ) -> None:
+        """A leftover claude-* sleep.model would burn one 400 per
+        conversation every night — reject it at config time."""
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        with pytest.raises(Exception, match="sleep.model"):
+            AgentConfig(
+                openai_api_key="sk-openai",
+                agent_wire_format="responses",
+                agent_config=str(agent_yaml),
+                **self._base_kwargs(tmp_path),
+            )
+
+    def test_responses_sleep_model_accepted(self, tmp_path: Path) -> None:
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: gpt-5-nano\n"
+        )
+        config = AgentConfig(
+            openai_api_key="sk-openai",
+            agent_wire_format="responses",
+            agent_config=str(agent_yaml),
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.sleep_config.model == "gpt-5-nano"
+
+    def test_claude_sleep_model_fine_on_messages_path(self, tmp_path: Path) -> None:
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_config=str(agent_yaml),
+            **self._base_kwargs(tmp_path),
+        )
+        assert config.sleep_config.model == "claude-haiku-4-5"
+
+    def test_mock_backend_credentials_resolve_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """llm_api_key/llm_base_url are backend-aware: mock uses no
+        credentials, so the responses key requirement never fires and
+        call sites need no special-casing."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs.pop("agent_model")
+        config = AgentConfig(
+            agent_llm_backend="mock",
+            agent_wire_format="responses",
+            **kwargs,
+        )
+        assert config.llm_api_key == ""
+        assert config.llm_base_url is None
+
+    def test_mock_backend_exempt_from_model_requirement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AGENT_MODEL", raising=False)
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs.pop("agent_model")
+        config = AgentConfig(
+            agent_llm_backend="mock",
+            agent_wire_format="responses",
+            **kwargs,
+        )
+        assert config.agent_wire_format == "responses"
+
+
 class TestYAMLConfig:
     def test_loads_from_yaml(self, tmp_path: Path) -> None:
         yaml_file = tmp_path / "agent.yaml"
@@ -458,6 +820,29 @@ class TestSleepConfig:
         """Backends without the batches API (e.g. Ollama) flip this to false."""
         config = SleepConfig(enabled=False)
         assert config.enabled is False
+
+    def test_batch_defaults_true(self) -> None:
+        assert SleepConfig().batch is True
+
+    def test_batch_false_parses_from_yaml(self, tmp_path: Path) -> None:
+        """The batches workaround: keep the sleep cycle but run deep-sleep
+        summaries as live calls (Ollama, the responses wire format)."""
+        yaml_file = tmp_path / "agent.yaml"
+        yaml_file.write_text(
+            "name: test\n"
+            "sleep:\n"
+            "  batch: false\n"
+        )
+        config = AgentConfig(
+            anthropic_api_key="sk-test",
+            agent_api_key="key",
+            agent_data_dir=tmp_path / "data",
+            agent_config=str(yaml_file),
+            _env_file=None,
+        )
+        assert config.sleep_config is not None
+        assert config.sleep_config.batch is False
+        assert config.sleep_config.enabled is True
 
     def test_disabled_from_yaml(self, tmp_path: Path) -> None:
         yaml_file = tmp_path / "agent.yaml"

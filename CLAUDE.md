@@ -23,7 +23,8 @@ Package structure under `src/agentlings/`:
 - `core/` — task engine
   - `task.py` — `TaskEngine`, `TaskRegistry`, `TaskWorker`, merge-back, crash recovery
   - `loop.py` — synchronous facade over `TaskEngine` for legacy callers
-  - `llm.py` — LLM client abstraction (Anthropic + mock backends)
+  - `llm.py` — LLM client abstraction (Anthropic + mock backends, factory)
+  - `llm_responses.py` — OpenAI Responses API backend (`AGENT_WIRE_FORMAT=responses`)
   - `store.py` — JSONL append/replay with compaction cursor + `TaskJournal` (sub-journal)
   - `models.py` — journal entry types (messages, compaction, task markers, merge wrappers)
   - `prompt.py` — system prompt builder
@@ -70,7 +71,8 @@ docker run -e ANTHROPIC_API_KEY=... -e AGENT_API_KEY=... -v ./data:/data -p 8420
 
 All via environment variables (loaded from `.env` via python-dotenv):
 - `ANTHROPIC_API_KEY` (required when talking to api.anthropic.com; optional when `ANTHROPIC_BASE_URL` points at a backend that ignores it, e.g. Ollama)
-- `ANTHROPIC_BASE_URL` (optional) — override the Messages endpoint. Set to `http://localhost:11434` to talk to Ollama's Anthropic-compatible API; combine with `AGENT_MODEL` set to an Ollama-served model (e.g. `qwen3-coder`) and `sleep.enabled: false` in the agent YAML since Ollama doesn't implement the batches API
+- `ANTHROPIC_BASE_URL` (optional) — override the Messages endpoint. Set to `http://localhost:11434` to talk to Ollama's Anthropic-compatible API; combine with `AGENT_MODEL` set to an Ollama-served model (e.g. `qwen3-coder`) and `sleep.batch: false` in the agent YAML since Ollama doesn't implement the batches API (deep-sleep summaries then run as live calls)
+- `AGENT_WIRE_FORMAT` (default `messages`) — LLM wire format: `messages` (Anthropic Messages API, the default) or `responses` (OpenAI Responses API, stateless, via `OPENAI_API_KEY` / `OPENAI_BASE_URL`; reusing `ANTHROPIC_API_KEY` against a non-OpenAI gateway requires the explicit `AGENT_SHARED_LLM_KEY=true` opt-in). The Responses backend has no batches API — the sleep cycle degrades to live summaries automatically (`sleep.batch: false` selects it explicitly). See `docs/responses-wire-format.md`
 - `AGENT_API_KEY` (required) — checked via `X-API-Key` header
 - `AGENT_MODEL` (default `claude-sonnet-4-6`)
 - `AGENT_MAX_TOKENS` (default `4096`)
