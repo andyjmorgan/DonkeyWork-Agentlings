@@ -52,10 +52,68 @@ for _name in ("asyncio", "a2a.server.events.event_queue"):
     logging.getLogger(_name).addFilter(_teardown_filter)
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+# Kept under the old name for any external references; new code should use
+# ``free_port``.
+_free_port = free_port
+
+
+def start_agentling_server(
+    config: AgentConfig,
+    readiness_path: str = "/.well-known/agent-card.json",
+) -> tuple[str, uvicorn.Server, threading.Thread]:
+    """Boot an agentling app in a daemon thread and wait until it is ready.
+
+    The single boot helper shared by every integration fixture. The
+    readiness loop sleeps unconditionally per iteration (an early 404/503
+    must not burn all attempts in milliseconds), tolerates any httpx
+    error — not just ConnectError — and shuts the server thread down
+    before raising on any failure.
+
+    Returns ``(url, server, thread)``; stop with ``stop_agentling_server``.
+    """
+    app = _create_app(config)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app, host="127.0.0.1", port=config.agent_port, log_level="warning",
+        )
+    )
+    loop = asyncio.new_event_loop()
+
+    def _run() -> None:
+        loop.run_until_complete(server.serve())
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    url = f"http://127.0.0.1:{config.agent_port}"
+    try:
+        for _ in range(50):
+            try:
+                resp = httpx.get(f"{url}{readiness_path}")
+                if resp.status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"agentling failed to start on {url}")
+    except BaseException:
+        stop_agentling_server(server, thread)
+        raise
+
+    return url, server, thread
+
+
+def stop_agentling_server(server: uvicorn.Server, thread: threading.Thread) -> None:
+    """Signal the server to exit and join its thread."""
+    server.should_exit = True
+    thread.join(timeout=5)
 
 
 @pytest.fixture(scope="session")
@@ -81,8 +139,6 @@ def _server(base_url: str, api_key: str, tmp_path_factory):
         yield base_url
         return
 
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
     data_dir = tmp_path_factory.mktemp("data")
     agent_yaml = tmp_path_factory.mktemp("config") / "agent.yaml"
     agent_yaml.write_text(
@@ -98,37 +154,16 @@ def _server(base_url: str, api_key: str, tmp_path_factory):
         agent_data_dir=data_dir,
         agent_llm_backend="mock",
         agent_host="127.0.0.1",
-        agent_port=port,
+        agent_port=free_port(),
         agent_config=str(agent_yaml),
     )
-    app = _create_app(config)
-
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    url, server, thread = start_agentling_server(
+        config, readiness_path="/.well-known/agent.json",
     )
-
-    loop = asyncio.new_event_loop()
-
-    def run_server():
-        loop.run_until_complete(server.serve())
-
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
-
-    for _ in range(50):
-        try:
-            resp = httpx.get(f"{url}/.well-known/agent.json")
-            if resp.status_code == 200:
-                break
-        except httpx.ConnectError:
-            time.sleep(0.1)
-    else:
-        raise RuntimeError("Server failed to start")
 
     yield url
 
-    server.should_exit = True
-    thread.join(timeout=5)
+    stop_agentling_server(server, thread)
 
 
 @pytest.fixture

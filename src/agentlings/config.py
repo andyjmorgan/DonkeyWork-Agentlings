@@ -14,6 +14,31 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
+def _parse_base_url_host(url: str) -> str | None:
+    """Extract the normalised hostname from a base URL, or ``None``.
+
+    ``None`` means the URL has no parseable ``scheme://host`` form (e.g.
+    a scheme-less ``api.openai.com``, which urlparse reads as a path).
+    The hostname is lowercased and FQDN-trailing-dot-stripped —
+    ``api.openai.com.`` is the same host as ``api.openai.com`` to DNS
+    and must classify identically.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    return parsed.hostname.lower().rstrip(".")
+
+
+def _is_openai_host(url: str) -> bool:
+    """Whether a URL points at OpenAI itself (any host under openai.com)."""
+    host = _parse_base_url_host(url)
+    return host is not None and (
+        host == "openai.com" or host.endswith(".openai.com")
+    )
+
+
 class MemoryConfig(BaseModel):
     """Memory subsystem configuration.
 
@@ -40,15 +65,18 @@ class SleepConfig(BaseModel):
 
     Attributes:
         enabled: When ``False``, the sleep cycle is not scheduled even if
-            the block is present. Set this for backends that lack the
-            Anthropic batches API (e.g. Ollama's compatibility layer).
+            the block is present.
         batch: When ``True`` (default), deep-sleep summaries are submitted to
             the Anthropic Message Batches API (50% cost, parallel, but may sit
-            for up to the poll timeout). When ``False``, each summary is run as
-            a sequential live ``complete()`` call instead — immediate, full
-            price, and usable against backends without a batches API (e.g.
-            Ollama). Combine with ``model`` to run sleep on a cheaper/faster
-            model than the agent uses for live turns.
+            for up to the poll timeout). When ``False``, each summary is run
+            as a sequential live ``complete()`` call instead — immediate,
+            full price, and usable against backends without a batches API
+            (Ollama's compatibility layer, the OpenAI Responses wire
+            format). Backends that advertise no batch support degrade to
+            the live path automatically even when this is ``True``. The
+            ``model`` override below is honoured on both paths; combine
+            with ``batch: false`` to run sleep on a cheaper/faster model
+            than the agent uses for live turns.
         schedule: Cron expression for when to run (default 2am daily).
         journal_retention_days: How long to keep journal files.
         conversation_retention_days: How long to keep JSONL conversation files.
@@ -324,6 +352,10 @@ class AgentConfig(BaseSettings):
 
     anthropic_api_key: str = ""
     anthropic_base_url: str | None = None
+    openai_api_key: str = ""
+    openai_base_url: str | None = None
+    agent_shared_llm_key: bool = False
+    agent_wire_format: Literal["messages", "responses"] = "messages"
     agent_api_key: str = ""
     agent_model: str = "claude-sonnet-4-6"
     agent_max_tokens: int = 4096
@@ -349,17 +381,156 @@ class AgentConfig(BaseSettings):
 
     _definition: AgentDefinition = AgentDefinition()
 
+    @property
+    def _uses_real_llm(self) -> bool:
+        """Whether a real LLM backend is active (mock uses no
+        credentials, no model, no endpoint). The single source of the
+        mock exemption used by credential/model validation."""
+        return self.agent_llm_backend != "mock"
+
     @model_validator(mode="after")
     def _init(self) -> AgentConfig:
         self.agent_data_dir.mkdir(parents=True, exist_ok=True)
         if self.agent_config:
             self._definition = _load_definition(self.agent_config)
+        if self.agent_wire_format == "responses" and self._uses_real_llm:
+            # Validation below is scoped to deployments that actually use
+            # the responses wire format — an OPENAI_BASE_URL exported for
+            # unrelated tooling must not abort a messages/mock deployment
+            # that never reads it.
+            if (
+                self.openai_base_url
+                and _parse_base_url_host(self.openai_base_url) is None
+            ):
+                # A scheme-less base URL parses as a path (no hostname),
+                # which would both break the HTTP client and bypass the
+                # openai.com fallback guard — reject it outright.
+                raise ValueError(
+                    f"OPENAI_BASE_URL ({self.openai_base_url!r}) is not a "
+                    "valid http(s) URL with a hostname"
+                )
+            # The built-in AGENT_MODEL default is a Messages-format
+            # Claude model that api.openai.com does not serve; selecting
+            # the responses wire format without choosing a model
+            # explicitly is a misconfiguration foot-gun, so it fails
+            # fast.
+            if "agent_model" not in self.model_fields_set:
+                raise ValueError(
+                    "AGENT_WIRE_FORMAT=responses requires AGENT_MODEL to "
+                    "be set explicitly — the built-in default "
+                    f"({self.agent_model!r}) is a Messages-format model "
+                    "that a Responses endpoint will not serve"
+                )
+            # Same foot-gun for the sleep-cycle model override — but any
+            # gateway indication (explicitly claude-* AGENT_MODEL, the
+            # shared-key opt-in, or a non-OpenAI base URL) means the
+            # endpoint may well serve Claude models over the responses
+            # protocol, mirroring the agent_model exemption. Hard-fail
+            # only when pointing at api.openai.com itself, which
+            # certainly does not serve them.
+            sleep = self._definition.sleep
+            if sleep and sleep.model and sleep.model.startswith("claude-"):
+                # An explicit api.openai.com destination is definitive — it
+                # cannot serve Messages-format models, so no gateway hint
+                # (shared key, claude agent model) may soften it to a warn.
+                openai_destination = bool(
+                    self.openai_base_url
+                    and _is_openai_host(self.openai_base_url)
+                )
+                gateway_indicated = not openai_destination and (
+                    self.agent_model.startswith("claude-")
+                    or self.agent_shared_llm_key
+                    or bool(self.openai_base_url)
+                )
+                if gateway_indicated:
+                    logger.warning(
+                        "sleep.model (%s) is a Claude model on the "
+                        "responses wire format — assuming the configured "
+                        "gateway serves it",
+                        sleep.model,
+                    )
+                else:
+                    raise ValueError(
+                        f"sleep.model ({sleep.model!r}) is a "
+                        "Messages-format model, which api.openai.com "
+                        "will not serve — set a Responses-served model, "
+                        "remove the override, or point OPENAI_BASE_URL "
+                        "at a gateway that serves it"
+                    )
         return self
 
     @property
     def definition(self) -> AgentDefinition:
         """The agent definition loaded from YAML (or defaults)."""
         return self._definition
+
+    @property
+    def llm_api_key(self) -> str:
+        """The API key for the active wire format.
+
+        On the ``responses`` wire format, ``OPENAI_API_KEY`` is used.
+        Reusing ``ANTHROPIC_API_KEY`` (a gateway serving both protocols
+        behind one inbound key) requires **explicit opt-in** via
+        ``AGENT_SHARED_LLM_KEY=true`` — credential routing is never
+        inferred from the URL alone: any host, including a typo'd one or
+        a third-party provider (Azure OpenAI, ...), would otherwise
+        receive the Anthropic secret as a Bearer token. Even with the
+        opt-in, hosts under openai.com and unparseable base URLs are
+        refused outright.
+
+        The mock backend uses no credentials, so it always resolves to an
+        empty key — irrelevant credential validation must never block a
+        mock deployment.
+
+        Raises:
+            ValueError: When ``AGENT_WIRE_FORMAT=responses`` (non-mock)
+                and no usable key is configured.
+        """
+        if not self._uses_real_llm:
+            return ""
+        if self.agent_wire_format == "responses":
+            if self.openai_api_key:
+                return self.openai_api_key
+            gateway_host = (
+                _parse_base_url_host(self.openai_base_url)
+                if self.openai_base_url else None
+            )
+            if (
+                self.agent_shared_llm_key
+                and gateway_host is not None
+                and not _is_openai_host(self.openai_base_url or "")
+            ):
+                logger.warning(
+                    "OPENAI_API_KEY unset — AGENT_SHARED_LLM_KEY is set, "
+                    "using ANTHROPIC_API_KEY for the responses wire "
+                    "format against gateway host %s",
+                    gateway_host,
+                )
+                return self.anthropic_api_key
+            raise ValueError(
+                "AGENT_WIRE_FORMAT=responses requires OPENAI_API_KEY. "
+                "To reuse ANTHROPIC_API_KEY against a non-OpenAI gateway, "
+                "set AGENT_SHARED_LLM_KEY=true and point OPENAI_BASE_URL "
+                "at the gateway (openai.com hosts and unparseable URLs "
+                "are always refused)"
+            )
+        return self.anthropic_api_key
+
+    @property
+    def llm_base_url(self) -> str | None:
+        """The endpoint override for the active wire format.
+
+        ``OPENAI_BASE_URL`` deliberately does not fall back to
+        ``ANTHROPIC_BASE_URL`` — that variable points at a Messages-shaped
+        endpoint, which would be wrong for the Responses wire format. The
+        mock backend makes no HTTP calls, so it always resolves to
+        ``None``.
+        """
+        if not self._uses_real_llm:
+            return None
+        if self.agent_wire_format == "responses":
+            return self.openai_base_url
+        return self.anthropic_base_url
 
     @property
     def agent_name(self) -> str:

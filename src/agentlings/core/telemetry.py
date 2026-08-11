@@ -172,6 +172,55 @@ sleep_span = otel_span
 # --------------------------------------------------------------------------- #
 
 
+def llm_complete_span(
+    backend: str,
+    model: str,
+    max_tokens: int,
+    message_count: int,
+    tool_count: int,
+    has_output_schema: bool,
+    context_id: str | None,
+    task_id: str | None,
+    sleep_cycle: bool = False,
+) -> Any:
+    """Open the standard ``agentling.llm.complete`` span for a backend.
+
+    Shared by every live LLM client so span shape stays identical across
+    wire formats; only ``llm.backend`` differs. ``sleep_cycle`` tags
+    nightly sleep-cycle traffic so traces can isolate it from
+    interactive task turns.
+    """
+    return otel_span("agentling.llm.complete", {
+        "llm.backend": backend,
+        "llm.model": model,
+        "llm.max_tokens": max_tokens,
+        "llm.message_count": message_count,
+        "llm.tool_count": tool_count,
+        "llm.has_output_schema": has_output_schema,
+        "llm.context_id": context_id or "",
+        "llm.task_id": task_id or "",
+        "agentling.sleep_cycle": sleep_cycle,
+    })
+
+
+def stamp_llm_completion(
+    span: Any,
+    duration_seconds: float,
+    stop_reason: str | None,
+    usage_total: dict[str, int],
+) -> None:
+    """Stamp the standard post-completion attributes onto an LLM span.
+
+    ``usage_total`` is the dict returned by :func:`record_llm_usage`.
+    """
+    span.set_attribute("llm.duration_seconds", round(duration_seconds, 4))
+    span.set_attribute("llm.stop_reason", stop_reason or "unknown")
+    span.set_attribute("llm.input_tokens", usage_total["input"])
+    span.set_attribute("llm.output_tokens", usage_total["output"])
+    span.set_attribute("llm.cache_creation_input_tokens", usage_total["cache_creation"])
+    span.set_attribute("llm.cache_read_input_tokens", usage_total["cache_read"])
+
+
 def capture_context() -> Any:
     """Capture the current OTel context.
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentlings"
-version = "0.17.3"
+version = "0.18.0"
 description = "Lightweight A2A + MCP single-process agent framework"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,12 +24,15 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.52",
-    "a2a-sdk>=1.0.0",
+    # a2a-sdk 1.1.2 broke tasks/cancel result aggregation (cancel returns the
+    # task still 'working' and terminal-state cancels no longer error); pin
+    # below it until the executor is ported to the new semantics.
+    "a2a-sdk>=1.0.0,<1.1.2",
     "starlette>=0.46",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.11",
     "pydantic-settings>=2.9",
-    "mcp>=1.10.0",
+    "mcp>=1.10.0,<2",
     "python-dotenv>=1.1",
     "pyyaml>=6.0",
     "pyjwt[crypto]>=2.10",
@@ -44,7 +47,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",
-    "a2a-sdk>=1.0.0",
+    "a2a-sdk>=1.0.0,<1.1.2",
 ]
 
 [project.urls]
@@ -63,6 +66,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "ollama: integration tests that require a live Ollama server reachable at OLLAMA_HOST",
+    "responses: live integration tests for the OpenAI Responses wire format; require RESPONSES_API_KEY (+ optionally RESPONSES_BASE_URL) for an OpenAI-compatible /v1/responses endpoint",
 ]
 # Silence noisy transitive-dependency deprecations. These are issues in
 # FastAPI/uvicorn/websockets/MCP SDK internals, not our code, and appear on

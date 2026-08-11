@@ -30,20 +30,19 @@ Test layout:
 
 from __future__ import annotations
 
-import asyncio
 import os
-import socket
-import threading
-import time
 
 import httpx
 import pytest
-import uvicorn
 
 from agentlings.config import AgentConfig
 from agentlings.core.llm import AnthropicLLMClient
-from agentlings.server import _create_app
 from tests.integration.a2a_client import A2AResponse, A2ATestClient
+from tests.integration.conftest import (
+    free_port,
+    start_agentling_server,
+    stop_agentling_server,
+)
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://192.168.69.21:11434")
 OLLAMA_MODELS = ["qwen3:4b", "gemma3:4b"]
@@ -64,12 +63,6 @@ pytestmark = [
         reason=f"Ollama not reachable at {OLLAMA_HOST}",
     ),
 ]
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -205,8 +198,6 @@ class TestOllamaLLMClient:
 def ollama_agentling(request, tmp_path_factory):
     model = request.param
     api_key = "ollama-integration-test-key"
-    port = _free_port()
-    url = f"http://127.0.0.1:{port}"
 
     safe = model.replace(":", "_").replace("/", "_")
     data_dir = tmp_path_factory.mktemp(f"data_{safe}")
@@ -233,38 +224,15 @@ def ollama_agentling(request, tmp_path_factory):
         # before any user-visible text is produced.
         agent_max_tokens=2048,
         agent_host="127.0.0.1",
-        agent_port=port,
+        agent_port=free_port(),
         agent_config=str(agent_yaml),
         agent_task_await_seconds=120,
     )
-    app = _create_app(config)
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    )
-    loop = asyncio.new_event_loop()
-
-    def _run() -> None:
-        loop.run_until_complete(server.serve())
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-    for _ in range(50):
-        try:
-            resp = httpx.get(f"{url}/.well-known/agent-card.json")
-            if resp.status_code == 200:
-                break
-        except httpx.ConnectError:
-            time.sleep(0.1)
-    else:
-        server.should_exit = True
-        thread.join(timeout=5)
-        raise RuntimeError(f"agentling failed to start for model {model}")
+    url, server, thread = start_agentling_server(config)
 
     yield url, api_key, model
 
-    server.should_exit = True
-    thread.join(timeout=5)
+    stop_agentling_server(server, thread)
 
 
 class TestOllamaA2A:

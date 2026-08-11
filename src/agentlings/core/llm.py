@@ -12,7 +12,12 @@ from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
 from agentlings.config import INTERLEAVED_THINKING_BETA, ThinkingConfig
-from agentlings.core.telemetry import otel_span, record_llm_usage
+from agentlings.core.telemetry import (
+    llm_complete_span,
+    otel_span,
+    record_llm_usage,
+    stamp_llm_completion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,84 @@ NAME_HEADER = "x-agentling-name"
 # ``"true"`` so a gateway rule can match on equality rather than presence.
 SLEEP_CYCLE_HEADER = "Agentling-SleepCycle"
 
+# Content blocks written by the Responses wire format carry an ``item_id``
+# key (reasoning/function-call identity for stateless replay). The Anthropic
+# Messages API rejects unknown block fields, so journals written under
+# AGENT_WIRE_FORMAT=responses are sanitised at this client's request
+# boundary before replay:
+#
+# * foreign ``thinking`` blocks (identified by ``item_id``) are DROPPED
+#   entirely — their ``signature`` holds OpenAI ``encrypted_content``, which
+#   is not an Anthropic thinking signature and would invalidate the history;
+# * other blocks merely have ``item_id`` stripped.
+_FOREIGN_BLOCK_KEYS = frozenset({"item_id"})
+_THINKING_BLOCK_TYPES = ("thinking", "redacted_thinking")
+
+
+def _strip_foreign_block_keys(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Sanitise foreign wire-format artifacts from content blocks.
+
+    When any message carries a foreign marker, the caller must suppress
+    the ``thinking`` request parameter (foreign reasoning cannot satisfy
+    Anthropic's native-thinking requirements) — and with thinking
+    suppressed, **every** thinking block is stripped from the history,
+    native ones included: Anthropic rejects thinking blocks in a request
+    without the thinking parameter, so a mixed native+foreign history
+    must be sanitised consistently or the context wedges. Native
+    thinking is replayable context, not required content, so eliding it
+    is safe.
+
+    A history with no foreign markers passes through as the original
+    objects, untouched — the clean messages-path is byte-identical. A
+    message whose content was entirely thinking keeps a placeholder text
+    block rather than becoming an empty (invalid) content array.
+
+    Returns ``(cleaned_messages, found_foreign)``.
+    """
+    found_foreign = any(
+        isinstance(content := message.get("content"), list)
+        and any(
+            isinstance(b, dict) and (b.keys() & _FOREIGN_BLOCK_KEYS)
+            for b in content
+        )
+        for message in messages
+    )
+    if not found_foreign:
+        return messages, False
+
+    cleaned: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            cleaned.append(message)
+            continue
+        new_blocks: list[Any] = []
+        for block in content:
+            if not isinstance(block, dict):
+                new_blocks.append(block)
+            elif block.get("type") in _THINKING_BLOCK_TYPES:
+                # Thinking is suppressed for this request — foreign
+                # reasoning is unrepresentable and native thinking would
+                # be rejected alongside a disabled thinking parameter.
+                continue
+            elif block.keys() & _FOREIGN_BLOCK_KEYS:
+                new_blocks.append({
+                    k: v for k, v in block.items()
+                    if k not in _FOREIGN_BLOCK_KEYS
+                })
+            else:
+                new_blocks.append(block)
+        if not new_blocks:
+            new_blocks = [{
+                "type": "text",
+                "text": "[reasoning from another provider elided]",
+            }]
+        cleaned.append({**message, "content": new_blocks})
+    return cleaned, True
+
+
 # Matches ``delay-<seconds>`` in mock user messages — used by integration
 # tests to produce genuinely slow responses without global configuration.
 # Example: ``"delay-5 please answer"`` sleeps 5 seconds before responding.
@@ -202,7 +285,17 @@ class BatchStatus:
 
 
 class BaseLLMClient(ABC):
-    """Abstract interface for LLM completion backends."""
+    """Abstract interface for LLM completion backends.
+
+    Attributes:
+        supports_batches: Whether the backend implements the ``batch_*``
+            methods for real. Backends without a batches API (e.g. the
+            OpenAI Responses wire format) set this to ``False`` so callers
+            like the sleep scheduler can refuse to rely on batching instead
+            of failing at runtime.
+    """
+
+    supports_batches: bool = True
 
     @abstractmethod
     async def complete(
@@ -232,9 +325,9 @@ class BaseLLMClient(ABC):
             task_id: The task execution this request belongs to. When set, it is
                 forwarded as the ``x-agentling-task-id`` request header so a single
                 task's Messages calls can be isolated within a session.
-            model: Overrides the client's configured model for this call only.
-                Used by the sleep cycle's non-batch path to run summaries on a
-                different model. ``None`` uses the configured model.
+            max_tokens: Per-call override of the client's response-token cap.
+            model: Per-call override of the client's default model (used by
+                e.g. the sleep cycle's ``sleep.model`` setting).
             sleep_cycle: When ``True``, the request is part of the nightly sleep
                 cycle. It is stamped with the ``Agentling-SleepCycle`` request
                 header and an ``agentling.sleep_cycle`` span attribute so
@@ -365,11 +458,12 @@ class AnthropicLLMClient(BaseLLMClient):
     ) -> LLMResponse:
         effective_max_tokens = max_tokens if max_tokens is not None else self._max_tokens
         use_model = model or self._model
+        cleaned_messages, had_foreign = _strip_foreign_block_keys(messages)
         kwargs: dict[str, Any] = {
             "model": use_model,
             "max_tokens": effective_max_tokens,
             "system": system,
-            "messages": messages,
+            "messages": cleaned_messages,
         }
         if tools:
             kwargs["tools"] = tools
@@ -380,8 +474,23 @@ class AnthropicLLMClient(BaseLLMClient):
                 "schema": output_schema,
             }
         # __new__ stubs in tests bypass __init__, so _thinking may be unset.
+        thinking_cfg = getattr(self, "_thinking", None)
+        if had_foreign and thinking_cfg is not None:
+            # With extended thinking enabled, Anthropic requires assistant
+            # tool_use messages to start with a native thinking block —
+            # which a history imported from another wire format cannot
+            # provide (its reasoning was dropped as unrepresentable).
+            # Suppress thinking for this request so crash recovery and
+            # replay of such histories still complete instead of 400ing.
+            logger.warning(
+                "history contains foreign wire-format blocks; disabling "
+                "extended thinking and eliding thinking blocks so the "
+                "replay stays valid (this recurs for every request in "
+                "this conversation while the foreign history remains)"
+            )
+            thinking_cfg = None
         thinking_block, output_addition, beta_header = _build_thinking_kwargs(
-            getattr(self, "_thinking", None), effective_max_tokens,
+            thinking_cfg, effective_max_tokens,
         )
         if thinking_block is not None:
             kwargs["thinking"] = thinking_block
@@ -401,17 +510,17 @@ class AnthropicLLMClient(BaseLLMClient):
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
 
-        with otel_span("agentling.llm.complete", {
-            "llm.backend": "anthropic",
-            "llm.model": use_model,
-            "llm.max_tokens": effective_max_tokens,
-            "llm.message_count": len(messages),
-            "llm.tool_count": len(tools or []),
-            "llm.has_output_schema": bool(output_schema),
-            "llm.context_id": context_id or "",
-            "llm.task_id": task_id or "",
-            "agentling.sleep_cycle": sleep_cycle,
-        }) as span:
+        with llm_complete_span(
+            backend="anthropic",
+            model=use_model,
+            max_tokens=effective_max_tokens,
+            message_count=len(messages),
+            tool_count=len(tools or []),
+            has_output_schema=bool(output_schema),
+            context_id=context_id,
+            task_id=task_id,
+            sleep_cycle=sleep_cycle,
+        ) as span:
             start = time.monotonic()
             response = await self._client.messages.create(**kwargs)
             duration = time.monotonic() - start
@@ -422,12 +531,7 @@ class AnthropicLLMClient(BaseLLMClient):
                 model=use_model,
                 path="live",
             )
-            span.set_attribute("llm.duration_seconds", round(duration, 4))
-            span.set_attribute("llm.stop_reason", response.stop_reason or "unknown")
-            span.set_attribute("llm.input_tokens", usage_total["input"])
-            span.set_attribute("llm.output_tokens", usage_total["output"])
-            span.set_attribute("llm.cache_creation_input_tokens", usage_total["cache_creation"])
-            span.set_attribute("llm.cache_read_input_tokens", usage_total["cache_read"])
+            stamp_llm_completion(span, duration, response.stop_reason, usage_total)
 
             return LLMResponse(
                 content=[block.model_dump() for block in response.content],
@@ -476,11 +580,14 @@ class AnthropicLLMClient(BaseLLMClient):
                 chunk = requests[i : i + BATCH_MAX_REQUESTS]
                 api_requests = []
                 for req in chunk:
+                    req_messages, req_had_foreign = _strip_foreign_block_keys(
+                        req.messages,
+                    )
                     params: dict[str, Any] = {
                         "model": use_model,
                         "max_tokens": req.max_tokens,
                         "system": req.system,
-                        "messages": req.messages,
+                        "messages": req_messages,
                     }
                     output_config: dict[str, Any] = {}
                     if req.output_schema:
@@ -489,7 +596,7 @@ class AnthropicLLMClient(BaseLLMClient):
                             "schema": req.output_schema,
                         }
                     thinking_block, output_addition, _beta = _build_thinking_kwargs(
-                        thinking_cfg, req.max_tokens,
+                        None if req_had_foreign else thinking_cfg, req.max_tokens,
                     )
                     # batch_create cannot send a per-request beta header, so
                     # interleaved thinking is incompatible with budget-mode
@@ -755,29 +862,67 @@ def create_llm_client(
     base_url: str | None = None,
     agent_name: str | None = None,
     thinking: ThinkingConfig | None = None,
+    wire_format: str = "messages",
 ) -> BaseLLMClient:
     """Factory that returns the appropriate LLM client for the given backend.
 
     Args:
-        backend: Either ``"anthropic"`` for the real API or ``"mock"`` for testing.
-        api_key: Anthropic API key. Required for the upstream Anthropic API,
-            optional when ``base_url`` points at a compatible backend (e.g.
-            Ollama) that does not validate the key.
+        backend: Either ``"anthropic"`` for a real API or ``"mock"`` for testing.
+        api_key: API key for the selected wire format's endpoint. Required for
+            the upstream APIs, optional when ``base_url`` points at a
+            compatible backend (e.g. Ollama) that does not validate the key.
         model: Model identifier to use for completions.
         max_tokens: Maximum tokens in the model response.
         tool_names: Tool names the mock backend should recognize.
-        base_url: Optional override for the Anthropic Messages endpoint.
-            When set, the client talks to that URL instead of api.anthropic.com.
+        base_url: Optional endpoint override. For the ``messages`` wire
+            format this replaces api.anthropic.com; for ``responses`` it
+            replaces api.openai.com.
         agent_name: When set, sent as the ``x-agentling-name`` default header on
             every request so a deployment can attribute LLM traffic to a specific
             agentling. Ignored by the mock backend (it makes no HTTP calls).
+        thinking: Extended-thinking configuration threaded to the client.
+        wire_format: ``"messages"`` (default) for the Anthropic Messages API,
+            ``"responses"`` for the OpenAI Responses API. Ignored when
+            ``backend`` is ``"mock"``.
+
+    Note on the two axes: ``backend`` selects real vs mock (``"mock"``
+    short-circuits everything); for a real backend, the **provider** is
+    selected by ``wire_format`` — ``backend="anthropic"`` is historical
+    naming for "real", not a provider label.
 
     Returns:
         A configured LLM client instance.
+
+    Raises:
+        ValueError: On an unknown ``wire_format`` — silently falling
+            through to the Anthropic path would send the caller's key to
+            the wrong provider on a simple typo.
     """
+    if wire_format not in ("messages", "responses"):
+        raise ValueError(
+            f"unknown wire_format {wire_format!r} (expected 'messages' or "
+            "'responses')"
+        )
+
     if backend == "mock":
         logger.info("using mock LLM backend")
         return MockLLMClient(tool_names=tool_names, thinking=thinking)
+
+    if wire_format == "responses":
+        from agentlings.core.llm_responses import ResponsesLLMClient
+
+        logger.info(
+            "using OpenAI Responses LLM backend (model=%s, base_url=%s)",
+            model, base_url or "https://api.openai.com",
+        )
+        return ResponsesLLMClient(
+            api_key=api_key,
+            model=model,
+            max_tokens=max_tokens,
+            base_url=base_url,
+            agent_name=agent_name,
+            thinking=thinking,
+        )
 
     if base_url:
         logger.info("using Anthropic-compatible LLM backend (model=%s, base_url=%s)", model, base_url)
@@ -798,6 +943,32 @@ def create_llm_client(
         base_url=base_url,
         agent_name=agent_name,
         thinking=thinking,
+    )
+
+
+def create_llm_client_from_config(
+    config: Any,
+    tool_names: list[str] | None = None,
+) -> BaseLLMClient:
+    """Build the LLM client from an ``AgentConfig`` — the single owner of
+    the config→client wiring used by both the server and the sleep CLI.
+
+    ``config.llm_api_key`` / ``config.llm_base_url`` are wire-format- and
+    backend-aware (the mock backend resolves to no credentials), so no
+    call-site special-casing is needed.
+    """
+    return create_llm_client(
+        backend=config.agent_llm_backend,
+        api_key=config.llm_api_key,
+        model=config.agent_model,
+        max_tokens=config.agent_max_tokens,
+        tool_names=tool_names,
+        base_url=config.llm_base_url,
+        agent_name=(
+            config.agent_name if config.definition.send_name_header else None
+        ),
+        thinking=config.definition.thinking,
+        wire_format=config.agent_wire_format,
     )
 
 

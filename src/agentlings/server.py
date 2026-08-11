@@ -24,7 +24,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agentlings.config import AgentConfig, OAuthConfig
-from agentlings.core.llm import create_llm_client
+from agentlings.core.llm import create_llm_client_from_config
 from agentlings.core.loop import MessageLoop
 from agentlings.core.memory_store import MemoryFileStore
 from agentlings.core.scheduler import run_scheduler
@@ -256,16 +256,7 @@ def _create_app(config: AgentConfig | None = None) -> Starlette:
             "(run 'agentling --list-tools' to see available options)"
         )
 
-    llm = create_llm_client(
-        backend=config.agent_llm_backend,
-        api_key=config.anthropic_api_key,
-        model=config.agent_model,
-        max_tokens=config.agent_max_tokens,
-        tool_names=tools.tool_names(),
-        base_url=config.anthropic_base_url,
-        agent_name=config.agent_name if config.definition.send_name_header else None,
-        thinking=config.definition.thinking,
-    )
+    llm = create_llm_client_from_config(config, tool_names=tools.tool_names())
 
     skills = discover_skills(config.skills_dir) if config.skills_dir else []
     if skills:

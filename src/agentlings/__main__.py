@@ -209,7 +209,7 @@ def _sleep_command(date_str: str | None) -> None:
             sys.exit(1)
 
     from agentlings.config import AgentConfig
-    from agentlings.core.llm import create_llm_client
+    from agentlings.core.llm import create_llm_client_from_config
     from agentlings.core.memory_store import MemoryFileStore
     from agentlings.core.sleep import SleepCycle
     from agentlings.core.store import JournalStore
@@ -220,15 +220,7 @@ def _sleep_command(date_str: str | None) -> None:
 
     memory_store = MemoryFileStore(config.agent_data_dir)
     journal_store = JournalStore(config.agent_data_dir)
-    llm = create_llm_client(
-        backend=config.agent_llm_backend,
-        api_key=config.anthropic_api_key,
-        model=config.agent_model,
-        max_tokens=config.agent_max_tokens,
-        base_url=config.anthropic_base_url,
-        agent_name=config.agent_name if config.definition.send_name_header else None,
-        thinking=config.definition.thinking,
-    )
+    llm = create_llm_client_from_config(config)
 
     cycle = SleepCycle(
         config=config, llm=llm, memory_store=memory_store, store=journal_store,
