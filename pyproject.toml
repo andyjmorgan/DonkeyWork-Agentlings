@@ -24,7 +24,10 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.52",
-    "a2a-sdk>=1.0.0",
+    # a2a-sdk 1.1.2 broke tasks/cancel result aggregation (cancel returns the
+    # task still 'working' and terminal-state cancels no longer error); pin
+    # below it until the executor is ported to the new semantics.
+    "a2a-sdk>=1.0.0,<1.1.2",
     "starlette>=0.46",
     "uvicorn[standard]>=0.34",
     "pydantic>=2.11",
@@ -44,7 +47,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",
-    "a2a-sdk>=1.0.0",
+    "a2a-sdk>=1.0.0,<1.1.2",
 ]
 
 [project.urls]
