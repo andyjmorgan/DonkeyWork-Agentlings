@@ -430,13 +430,17 @@ class AgentConfig(BaseSettings):
             # certainly does not serve them.
             sleep = self._definition.sleep
             if sleep and sleep.model and sleep.model.startswith("claude-"):
-                gateway_indicated = (
+                # An explicit api.openai.com destination is definitive — it
+                # cannot serve Messages-format models, so no gateway hint
+                # (shared key, claude agent model) may soften it to a warn.
+                openai_destination = bool(
+                    self.openai_base_url
+                    and _is_openai_host(self.openai_base_url)
+                )
+                gateway_indicated = not openai_destination and (
                     self.agent_model.startswith("claude-")
                     or self.agent_shared_llm_key
-                    or bool(
-                        self.openai_base_url
-                        and not _is_openai_host(self.openai_base_url)
-                    )
+                    or bool(self.openai_base_url)
                 )
                 if gateway_indicated:
                     logger.warning(

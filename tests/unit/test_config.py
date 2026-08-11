@@ -502,6 +502,29 @@ class TestWireFormatConfig:
                 **self._base_kwargs(tmp_path),
             )
 
+    def test_openai_destination_overrides_gateway_hints(
+        self, tmp_path: Path,
+    ) -> None:
+        """An explicit api.openai.com base URL is definitive: no gateway
+        hint (claude-* agent model, shared key) may soften the claude-*
+        sleep.model rejection to a warning — OpenAI cannot serve it."""
+        agent_yaml = tmp_path / "agent.yaml"
+        agent_yaml.write_text(
+            "name: t\n"
+            "sleep:\n"
+            "  model: claude-haiku-4-5\n"
+        )
+        kwargs = self._base_kwargs(tmp_path)
+        kwargs["agent_model"] = "claude-sonnet-4-6"
+        with pytest.raises(Exception, match="sleep.model"):
+            AgentConfig(
+                openai_api_key="sk-openai",
+                openai_base_url="https://api.openai.com/v1",
+                agent_wire_format="responses",
+                agent_config=str(agent_yaml),
+                **kwargs,
+            )
+
     def test_claude_sleep_model_warns_when_agent_model_also_claude(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
