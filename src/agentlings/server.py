@@ -77,9 +77,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     Either credential is accepted. The API key is a single shared secret. The
     Bearer path validates the JWT's signature against the issuer's published
-    JWKS and checks ``iss``/``aud``/``exp`` — no scope or per-user
-    authorization. When OAuth is disabled this behaves exactly like a plain
-    API-key gate.
+    JWKS and checks ``iss``/``aud``/``exp``, plus any ``required_roles``
+    configured on the OAuth block (a token must carry all of them). With no
+    ``required_roles`` this is audience-only, exactly as before. When OAuth is
+    disabled this behaves exactly like a plain API-key gate.
     """
 
     def __init__(
@@ -119,13 +120,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         token = header[7:].strip()
         try:
             signing_key = self._jwks().get_signing_key_from_jwt(token)
-            jwt.decode(
+            claims = jwt.decode(
                 token,
                 signing_key.key,
                 algorithms=self._oauth.algorithms,
                 audience=self._oauth.audience,
                 issuer=self._oauth.issuer,
             )
+            if self._oauth.required_roles and not self._has_required_roles(claims):
+                logger.debug("bearer token rejected: missing required role(s)")
+                return False
             return True
         except Exception:  # noqa: BLE001 — any verification failure is an auth failure
             logger.debug("bearer token rejected", exc_info=True)
@@ -136,6 +140,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if self._jwks_client is None:
             self._jwks_client = PyJWKClient(_resolve_jwks_uri(self._oauth))
         return self._jwks_client
+
+    def _has_required_roles(self, claims: dict[str, Any]) -> bool:
+        """True when ``claims`` carries every role in ``oauth.required_roles``.
+
+        Roles are gathered from Keycloak-style ``realm_access.roles`` and
+        ``resource_access.<client>.roles``, plus a flat top-level ``roles``
+        claim, so the check works across common token layouts.
+        """
+        assert self._oauth is not None
+        present: set[str] = set()
+        realm = claims.get("realm_access")
+        if isinstance(realm, dict) and isinstance(realm.get("roles"), list):
+            present.update(realm["roles"])
+        resource = claims.get("resource_access")
+        if isinstance(resource, dict):
+            for entry in resource.values():
+                if isinstance(entry, dict) and isinstance(entry.get("roles"), list):
+                    present.update(entry["roles"])
+        flat = claims.get("roles")
+        if isinstance(flat, list):
+            present.update(flat)
+        return all(role in present for role in self._oauth.required_roles)
 
     def _unauthorized(self) -> Response:
         headers: dict[str, str] = {}

@@ -216,6 +216,13 @@ class OAuthConfig(BaseModel):
             first use from the issuer's OIDC discovery document
             (``{issuer}/.well-known/openid-configuration``).
         algorithms: Permitted JWS signing algorithms.
+        required_roles: Roles the token must carry (ALL of them) in addition to
+            a valid signature and ``iss``/``aud``/``exp``. Empty (the default)
+            preserves audience-only behaviour, so existing agentlings are
+            unaffected. Roles are read from Keycloak-style ``realm_access.roles``
+            and ``resource_access.<client>.roles``, plus a flat ``roles`` claim.
+            This is how a deployment scopes access to specific principals
+            (e.g. an operator role) without the framework hard-coding any policy.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -225,6 +232,7 @@ class OAuthConfig(BaseModel):
     audience: str = ""
     jwks_uri: str | None = None
     algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+    required_roles: list[str] = Field(default_factory=list)
 
 
 class IconsConfig(BaseModel):
@@ -376,6 +384,7 @@ class AgentConfig(BaseSettings):
     agent_oauth_issuer: str | None = None
     agent_oauth_audience: str | None = None
     agent_oauth_jwks_uri: str | None = None
+    agent_oauth_required_roles: str | None = None  # comma-separated; overrides YAML
     agent_a2a_streaming: bool | None = None
     agent_a2a_tool_progress_summaries: bool | None = None
 
@@ -597,6 +606,12 @@ class AgentConfig(BaseSettings):
                 updates["audience"] = self.agent_oauth_audience
             if self.agent_oauth_jwks_uri:
                 updates["jwks_uri"] = self.agent_oauth_jwks_uri
+            if self.agent_oauth_required_roles:
+                updates["required_roles"] = [
+                    r.strip()
+                    for r in self.agent_oauth_required_roles.split(",")
+                    if r.strip()
+                ]
             base = base.model_copy(update=updates)
         if base is None or not base.enabled:
             return None
