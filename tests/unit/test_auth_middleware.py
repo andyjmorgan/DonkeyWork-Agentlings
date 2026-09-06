@@ -246,3 +246,53 @@ def test_protected_resource_metadata_shape() -> None:
     assert doc["resource"] == "https://agent.example.com/mcp"
     assert doc["authorization_servers"] == [ISSUER]
     assert doc["bearer_methods_supported"] == ["header"]
+
+
+@pytest.fixture
+def oauth_with_role() -> OAuthConfig:
+    return OAuthConfig(
+        enabled=True,
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        jwks_uri="https://auth.example.com/jwks",
+        required_roles=["k3s-agentling-operator"],
+    )
+
+
+def test_bearer_with_required_realm_role_passes(
+    app_factory, oauth_with_role: OAuthConfig, keypair
+) -> None:
+    private_key, _ = keypair
+    client = app_factory(oauth_with_role)
+    token = _mint(
+        private_key,
+        realm_access={"roles": ["k3s-agentling-operator", "offline_access"]},
+    )
+    resp = client.get("/mcp", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+
+
+def test_bearer_missing_required_role_rejected(
+    app_factory, oauth_with_role: OAuthConfig, keypair
+) -> None:
+    """A validly-signed, correctly-audienced token without the role is rejected —
+    this is what stops any other realm user (or an anon-DCR service account)
+    from reaching a role-gated agentling."""
+    private_key, _ = keypair
+    client = app_factory(oauth_with_role)
+    token = _mint(private_key, realm_access={"roles": ["offline_access"]})
+    resp = client.get("/mcp", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
+
+
+def test_bearer_required_role_via_client_role_passes(
+    app_factory, oauth_with_role: OAuthConfig, keypair
+) -> None:
+    private_key, _ = keypair
+    client = app_factory(oauth_with_role)
+    token = _mint(
+        private_key,
+        resource_access={"k3s-agentling": {"roles": ["k3s-agentling-operator"]}},
+    )
+    resp = client.get("/mcp", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200

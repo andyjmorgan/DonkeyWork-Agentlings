@@ -88,6 +88,8 @@ telemetry:
 #   issuer: https://auth.example.com/realms/Agents
 #   audience: my-agentling-api          # must match the token's aud claim
 #   jwks_uri: null                      # optional; derived from OIDC discovery when omitted
+#   required_roles:                     # optional; token must carry ALL listed roles
+#     - my-agentling-operator           #   (realm_access/resource_access roles). Empty = audience-only.
 
 # icons:
 #   # Icons advertised on the MCP surface (serverInfo + per-tool). Each value is
